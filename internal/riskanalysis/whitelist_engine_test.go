@@ -2,6 +2,7 @@ package riskanalysis
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -193,5 +194,76 @@ func TestLocalReputationCacheTTLAndLRU(t *testing.T) {
 	cache.now = func() time.Time { return time.Unix(120, 0) }
 	if _, _, ok := cache.Get(hashB); ok {
 		t.Fatal("expected hashB expired by TTL")
+	}
+}
+
+func TestWhitelistEmbeddedRulesCacheStrictAllowByHash(t *testing.T) {
+	resetEmbeddedRulesWhitelistForTest()
+	hashes, _, err := embeddedRulesWhitelistSnapshotForTest()
+	if err != nil {
+		t.Fatalf("embeddedRulesWhitelistSnapshotForTest error: %v", err)
+	}
+
+	var ruleHash string
+	for key := range hashes {
+		ruleHash = key
+		break
+	}
+	if ruleHash == "" {
+		t.Fatal("expected at least one embedded rules hash")
+	}
+
+	engine := NewDefaultWhitelistEngine(nil, nil, nil)
+	result, err := engine.Evaluate(context.Background(), TargetMetadata{
+		TargetPath: filepath.Join(`C:\tools`, `.c-eyes-yara-rules-cache`, "demo.yar"),
+		Hashes:     Hashes{Sha256: ruleHash},
+	}, ScanRecord{}, whitelistStageSmart)
+	if err != nil {
+		t.Fatalf("Evaluate error: %v", err)
+	}
+	if result.Decision != WhitelistDecisionAllow {
+		t.Fatalf("expected allow, got %s", result.Decision)
+	}
+	if result.Source != "embedded_rules_cache" {
+		t.Fatalf("expected embedded_rules_cache source, got %s", result.Source)
+	}
+}
+
+func TestWhitelistEmbeddedRulesCacheRejectsUnknownHash(t *testing.T) {
+	resetEmbeddedRulesWhitelistForTest()
+	engine := NewDefaultWhitelistEngine(nil, nil, nil)
+	result, err := engine.Evaluate(context.Background(), TargetMetadata{
+		TargetPath: filepath.Join(`C:\tools`, `.c-eyes-yara-rules-cache`, "demo.yar"),
+		Hashes:     Hashes{Sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+	}, ScanRecord{}, whitelistStageSmart)
+	if err != nil {
+		t.Fatalf("Evaluate error: %v", err)
+	}
+	if result.Decision != WhitelistDecisionContinue {
+		t.Fatalf("expected continue, got %s", result.Decision)
+	}
+}
+
+func TestWhitelistEmbeddedRulesCacheRejectsUnsupportedFileType(t *testing.T) {
+	resetEmbeddedRulesWhitelistForTest()
+	hashes, _, err := embeddedRulesWhitelistSnapshotForTest()
+	if err != nil {
+		t.Fatalf("embeddedRulesWhitelistSnapshotForTest error: %v", err)
+	}
+	var ruleHash string
+	for key := range hashes {
+		ruleHash = key
+		break
+	}
+	engine := NewDefaultWhitelistEngine(nil, nil, nil)
+	result, err := engine.Evaluate(context.Background(), TargetMetadata{
+		TargetPath: filepath.Join(`C:\tools`, `.c-eyes-yara-rules-cache`, "demo.txt"),
+		Hashes:     Hashes{Sha256: ruleHash},
+	}, ScanRecord{}, whitelistStageSmart)
+	if err != nil {
+		t.Fatalf("Evaluate error: %v", err)
+	}
+	if result.Decision != WhitelistDecisionContinue {
+		t.Fatalf("expected continue, got %s", result.Decision)
 	}
 }

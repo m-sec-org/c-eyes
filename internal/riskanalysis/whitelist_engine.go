@@ -91,6 +91,18 @@ func (e *DefaultWhitelistEngine) Evaluate(ctx context.Context, meta TargetMetada
 		return out, nil
 	}
 
+	// 2.5) Strict internal cache allowlist: only known embedded rule artifacts.
+	if matched, policyID, evidence := matchEmbeddedRulesCache(meta); matched {
+		out.Decision = WhitelistDecisionAllow
+		out.Source = "embedded_rules_cache"
+		out.PolicyID = policyID
+		out.Reason = "embedded rules cache artifact path/type/hash matched strict allowlist"
+		out.Confidence = 100
+		out.Evidence = evidence
+		e.Cache.Set(hash, WhitelistDecisionAllow)
+		return out, nil
+	}
+
 	// 3) Safe local cache.
 	if decision, expires, ok := e.Cache.Get(hash); ok && decision == WhitelistDecisionAllow {
 		out.Decision = WhitelistDecisionAllow

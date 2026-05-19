@@ -66,8 +66,17 @@ func TestBuildWindowsMessageSummarySecurityCode(t *testing.T) {
 	t.Parallel()
 
 	msg := buildWindowsMessageSummary("security", "4624", []string{"a", "b"}, "raw")
-	if msg != "An account was successfully logged on." {
+	if msg != "An account was successfully logged on. | a | b" {
 		t.Fatalf("unexpected summary: %q", msg)
+	}
+}
+
+func TestBuildWindowsMessageSummaryFallsBackToCanonicalWhenNoTextualParts(t *testing.T) {
+	t.Parallel()
+
+	msg := buildWindowsMessageSummary("security", "4624", []string{"0x3e7", "127.0.0.1"}, "raw")
+	if msg != "An account was successfully logged on." {
+		t.Fatalf("unexpected canonical summary: %q", msg)
 	}
 }
 

@@ -408,12 +408,6 @@ func parseWindowsProcess(channel, eventCode string, stringsList []string, fullTe
 }
 
 func buildWindowsMessageSummary(channel, eventCode string, stringsList []string, fallback string) string {
-	if channel == "security" {
-		if summary, ok := windowsSecurityMessageSummary[eventCode]; ok {
-			return summary
-		}
-	}
-
 	candidates := make([]string, 0, 3)
 	for _, item := range stringsList {
 		trimmed := strings.TrimSpace(item)
@@ -425,6 +419,16 @@ func buildWindowsMessageSummary(channel, eventCode string, stringsList []string,
 			break
 		}
 	}
+
+	if channel == "security" {
+		if summary, ok := windowsSecurityMessageSummary[eventCode]; ok {
+			if len(candidates) > 0 {
+				return summary + " | " + strings.Join(candidates, " | ")
+			}
+			return summary
+		}
+	}
+
 	if len(candidates) > 0 {
 		return strings.Join(candidates, " | ")
 	}

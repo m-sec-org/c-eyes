@@ -14,11 +14,8 @@ func TestNormalizeParamsValidation(t *testing.T) {
 	if _, err := normalizeParams(QueryParams{StartTime: 20, EndTime: 10}); err == nil {
 		t.Fatal("expected startTime > endTime error")
 	}
-	if _, err := normalizeParams(QueryParams{StartTime: 10, EndTime: 20, PageNo: -1}); err == nil {
-		t.Fatal("expected pageNo bounds error")
-	}
-	if _, err := normalizeParams(QueryParams{StartTime: 10, EndTime: 20, PageSize: 1000}); err == nil {
-		t.Fatal("expected pageSize bounds error")
+	if _, err := normalizeParams(QueryParams{StartTime: 10, EndTime: 20, MaxLogs: -1}); err == nil {
+		t.Fatal("expected maxLogs bounds error")
 	}
 	if _, err := normalizeParams(QueryParams{StartTime: 10, EndTime: 20, SortBy: "unknown"}); err == nil {
 		t.Fatal("expected sortBy whitelist error")
@@ -32,11 +29,8 @@ func TestNormalizeParamsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("normalizeParams returned error: %v", err)
 	}
-	if got.PageNo != DefaultPageNo {
-		t.Fatalf("expected default pageNo=%d, got %d", DefaultPageNo, got.PageNo)
-	}
-	if got.PageSize != DefaultPageSize {
-		t.Fatalf("expected default pageSize=%d, got %d", DefaultPageSize, got.PageSize)
+	if got.MaxLogs != 0 {
+		t.Fatalf("expected default maxLogs=0, got %d", got.MaxLogs)
 	}
 	if got.SortBy != DefaultSortBy {
 		t.Fatalf("expected default sortBy=%s, got %s", DefaultSortBy, got.SortBy)
@@ -59,8 +53,6 @@ func TestBuildResultFilterSemanticsAndKeyword(t *testing.T) {
 		Results:  []string{"fail", "success"},
 		Username: strPtr("alice"),
 		Keyword:  strPtr("failed"),
-		PageNo:   1,
-		PageSize: 20,
 	})
 	if err != nil {
 		t.Fatalf("normalizeParams returned error: %v", err)
@@ -116,14 +108,12 @@ func TestBuildResultFilterSemanticsAndKeyword(t *testing.T) {
 	}
 }
 
-func TestBuildResultSortingAndStablePagination(t *testing.T) {
+func TestBuildResultReturnsAllRowsInStableOrder(t *testing.T) {
 	t.Parallel()
 
 	params, err := normalizeParams(QueryParams{
 		StartTime: 1,
 		EndTime:   999999999,
-		PageNo:    1,
-		PageSize:  1,
 	})
 	if err != nil {
 		t.Fatalf("normalizeParams returned error: %v", err)
@@ -135,33 +125,74 @@ func TestBuildResultSortingAndStablePagination(t *testing.T) {
 		{NativeID: "c", Timestamp: 1000, Source: "system", EventType: "system", Message: "third"},
 	}
 
-	page1 := buildResult(params, events)
-	if page1.Total != 3 {
-		t.Fatalf("expected total=3, got %d", page1.Total)
+	result := buildResult(params, events)
+	if result.Total != 3 {
+		t.Fatalf("expected total=3, got %d", result.Total)
 	}
-	if !page1.HasMore {
-		t.Fatal("expected page1 hasMore=true")
+	if len(result.Rows) != 3 {
+		t.Fatalf("expected rows=3, got %d", len(result.Rows))
 	}
-	if len(page1.Rows) != 1 {
-		t.Fatalf("expected page1 rows=1, got %d", len(page1.Rows))
+	if result.Rows[0].Timestamp != 2000 || result.Rows[2].Timestamp != 1000 {
+		t.Fatalf("unexpected sort order: %#v", result.Rows)
+	}
+	if result.Rows[0].LogID == result.Rows[1].LogID {
+		t.Fatalf("expected distinct rows, got duplicated logId=%s", result.Rows[0].LogID)
+	}
+}
+
+func TestBuildResultReturnsAllRows(t *testing.T) {
+	t.Parallel()
+
+	params, err := normalizeParams(QueryParams{
+		StartTime: 1,
+		EndTime:   999999999,
+	})
+	if err != nil {
+		t.Fatalf("normalizeParams returned error: %v", err)
 	}
 
-	params.PageNo = 2
-	page2 := buildResult(params, events)
-	if len(page2.Rows) != 1 {
-		t.Fatalf("expected page2 rows=1, got %d", len(page2.Rows))
-	}
-	if page1.Rows[0].LogID == page2.Rows[0].LogID {
-		t.Fatalf("expected stable page boundaries with different rows, got same logId=%s", page1.Rows[0].LogID)
+	events := []rawEvent{
+		{NativeID: "a", Timestamp: 2000, Source: "system", EventType: "system", Message: "first"},
+		{NativeID: "b", Timestamp: 2000, Source: "system", EventType: "system", Message: "second"},
+		{NativeID: "c", Timestamp: 1000, Source: "system", EventType: "system", Message: "third"},
 	}
 
-	params.PageNo = 3
-	page3 := buildResult(params, events)
-	if len(page3.Rows) != 1 {
-		t.Fatalf("expected page3 rows=1, got %d", len(page3.Rows))
+	result := buildResult(params, events)
+	if result.Total != 3 {
+		t.Fatalf("expected total=3, got %d", result.Total)
 	}
-	if page3.HasMore {
-		t.Fatal("expected page3 hasMore=false")
+	if len(result.Rows) != 3 {
+		t.Fatalf("expected rows=3, got %d", len(result.Rows))
+	}
+}
+
+func TestBuildResultAppliesMaxLogsAfterSort(t *testing.T) {
+	t.Parallel()
+
+	params, err := normalizeParams(QueryParams{
+		StartTime: 1,
+		EndTime:   999999999,
+		MaxLogs:   2,
+	})
+	if err != nil {
+		t.Fatalf("normalizeParams returned error: %v", err)
+	}
+
+	events := []rawEvent{
+		{NativeID: "a", Timestamp: 1000, Source: "system", EventType: "system", Message: "third"},
+		{NativeID: "b", Timestamp: 3000, Source: "system", EventType: "system", Message: "first"},
+		{NativeID: "c", Timestamp: 2000, Source: "system", EventType: "system", Message: "second"},
+	}
+
+	result := buildResult(params, events)
+	if result.Total != 2 {
+		t.Fatalf("expected total=2, got %d", result.Total)
+	}
+	if len(result.Rows) != 2 {
+		t.Fatalf("expected rows=2, got %d", len(result.Rows))
+	}
+	if result.Rows[0].Timestamp != 3000 || result.Rows[1].Timestamp != 2000 {
+		t.Fatalf("expected maxLogs applied after sort, got %#v", result.Rows)
 	}
 }
 
@@ -171,8 +202,6 @@ func TestNormalizeMappingWindowsLinuxAndFallback(t *testing.T) {
 	params, err := normalizeParams(QueryParams{
 		StartTime: 1,
 		EndTime:   999999999,
-		PageNo:    1,
-		PageSize:  10,
 		SortBy:    "timestamp",
 		SortOrder: "asc",
 	})
@@ -234,8 +263,6 @@ func TestRawContentPolicyRedactionAndTruncation(t *testing.T) {
 	base := QueryParams{
 		StartTime: 1,
 		EndTime:   999999999,
-		PageNo:    1,
-		PageSize:  10,
 	}
 
 	noRawParams, err := normalizeParams(base)
@@ -261,8 +288,6 @@ func TestRawContentPolicyRedactionAndTruncation(t *testing.T) {
 	withRawParams, err := normalizeParams(QueryParams{
 		StartTime:         1,
 		EndTime:           999999999,
-		PageNo:            1,
-		PageSize:          10,
 		IncludeRawContent: true,
 	})
 	if err != nil {
@@ -327,8 +352,6 @@ func TestLogIDStabilityNativeAndFallback(t *testing.T) {
 	params, err := normalizeParams(QueryParams{
 		StartTime: 1,
 		EndTime:   999999999,
-		PageNo:    1,
-		PageSize:  10,
 	})
 	if err != nil {
 		t.Fatalf("normalizeParams returned error: %v", err)

@@ -89,6 +89,7 @@ var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
 var autoResultIndexPattern = regexp.MustCompile(`^result([0-9]+)\.xlsx$`)
 var autoJSONResultIndexPattern = regexp.MustCompile(`^result([0-9]+)\.json$`)
 var eventlogLastPattern = regexp.MustCompile(`^(\d+)\s*([dDwW])$`)
+var eventlogScanFunc = eventlogscan.Scan
 
 type globalCLIOptions struct {
 	ShowHelp    bool
@@ -666,14 +667,21 @@ func runEventlogCLI(args []string, global globalCLIOptions) int {
 		return 0
 	}
 
-	result, err := eventlogscan.Scan(context.Background(), parsed.Params)
+	progress := newTerminalProgress(os.Stderr, "eventlog")
+	defer progress.Done()
+
+	parsed.Params.Progress = scopedProgressUpdate(progress, "")
+
+	result, err := eventlogScanFunc(context.Background(), parsed.Params)
 	if err != nil {
+		progress.Done()
 		fmt.Fprintln(os.Stderr, err)
 		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(err.Error())), "invalid argument:") {
 			return 2
 		}
 		return 1
 	}
+	progress.Done()
 
 	if err := emitOutput(result, global.OutputPath); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -957,8 +965,7 @@ func parseEventlogArgs(args []string) (eventlogParseResult, error) {
 		startTimeRaw string
 		endTimeRaw   string
 		lastRaw      string
-		pageNo       optionalInt
-		pageSize     optionalInt
+		maxLogs      optionalInt
 		sources      stringSliceFlag
 		eventTypes   stringSliceFlag
 		eventLevels  stringSliceFlag
@@ -985,8 +992,7 @@ func parseEventlogArgs(args []string) (eventlogParseResult, error) {
 	fs.StringVar(&startTimeRaw, "startTime", "", "query start time (unix ms / RFC3339 / YYYY-MM-DD[ HH:MM:SS])")
 	fs.StringVar(&endTimeRaw, "endTime", "", "query end time (default: now; unix ms / RFC3339 / YYYY-MM-DD[ HH:MM:SS])")
 	fs.StringVar(&lastRaw, "last", "", "relative time window (default: 24h; e.g. 30m, 24h, 7d)")
-	fs.Var(&pageNo, "pageNo", "page number")
-	fs.Var(&pageSize, "pageSize", "page size")
+	fs.Var(&maxLogs, "maxLogs", "maximum returned log rows (0 means unlimited)")
 	fs.Var(&sources, "sources", "source filters")
 	fs.Var(&eventTypes, "eventTypes", "event type filters")
 	fs.Var(&eventLevels, "eventLevels", "event level filters")
@@ -1022,6 +1028,7 @@ func parseEventlogArgs(args []string) (eventlogParseResult, error) {
 	params := eventlogscan.QueryParams{
 		StartTime:         startTime,
 		EndTime:           endTime,
+		MaxLogs:           0,
 		Sources:           append([]string{}, sources.values...),
 		EventTypes:        append([]string{}, eventTypes.values...),
 		EventLevels:       append([]string{}, eventLevels.values...),
@@ -1034,15 +1041,11 @@ func parseEventlogArgs(args []string) (eventlogParseResult, error) {
 		IncludeRawContent: includeRawContent,
 	}
 
-	if pageNo.set {
-		params.PageNo = pageNo.value
-	} else {
-		params.PageNo = eventlogscan.DefaultPageNo
-	}
-	if pageSize.set {
-		params.PageSize = pageSize.value
-	} else {
-		params.PageSize = eventlogscan.DefaultPageSize
+	if maxLogs.set {
+		if maxLogs.value < 0 {
+			return result, fmt.Errorf("invalid argument: maxLogs must be >= 0")
+		}
+		params.MaxLogs = maxLogs.value
 	}
 
 	if trimmed := strings.TrimSpace(processName); trimmed != "" {
@@ -5192,8 +5195,7 @@ func eventlogUsage() {
 	fmt.Fprintln(os.Stderr, "    -startTime <time>                Query start time (unix ms / RFC3339 / YYYY-MM-DD[ HH:MM:SS])")
 	fmt.Fprintln(os.Stderr, "    -endTime <time>                  Query end time (default: now; unix ms / RFC3339 / YYYY-MM-DD[ HH:MM:SS])")
 	fmt.Fprintln(os.Stderr, "    -last <duration>                 Query recent window (default: 24h, e.g. 30m/24h/7d)")
-	fmt.Fprintln(os.Stderr, "    -pageNo <number>                 Page number (default: 1)")
-	fmt.Fprintln(os.Stderr, "    -pageSize <number>               Page size (default: 20, max: 200)")
+	fmt.Fprintln(os.Stderr, "    -maxLogs <number>                Maximum returned log rows (default: 0, unlimited)")
 	fmt.Fprintln(os.Stderr, "    -sources <a,b,c>                 Sources filter: system/security/application/syslog/auth/audit/kern")
 	fmt.Fprintln(os.Stderr, "    -eventTypes <a,b,c>              Event types: process/file/network/registry/account/service/login/system/policy")
 	fmt.Fprintln(os.Stderr, "    -eventLevels <a,b,c>             Event levels: debug/info/notice/warn/error/critical/fatal")
@@ -5216,6 +5218,7 @@ func eventlogUsage() {
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "NOTE:")
 	fmt.Fprintln(os.Stderr, "    eventlog is collection-only and does not support -r/--riskanalyze or risk options.")
+	fmt.Fprintln(os.Stderr, "    eventlog always returns all matched rows in a single result set.")
 }
 
 func netscanUsage() {

@@ -1,12 +1,6 @@
 package eventlogscan
 
 const (
-	// DefaultPageNo is the default page number when pageNo is omitted.
-	DefaultPageNo = 1
-	// DefaultPageSize is the default page size when pageSize is omitted.
-	DefaultPageSize = 20
-	// MaxPageSize is the hard upper bound for pageSize.
-	MaxPageSize = 200
 	// DefaultSortBy is the default sort field.
 	DefaultSortBy = "timestamp"
 	// DefaultSortOrder is the default sort direction.
@@ -20,9 +14,7 @@ type ProgressFunc func(done, total int, stage string)
 type QueryParams struct {
 	StartTime int64
 	EndTime   int64
-
-	PageNo   int
-	PageSize int
+	MaxLogs   int
 
 	Sources      []string
 	EventTypes   []string
@@ -53,11 +45,8 @@ type QueryParams struct {
 
 // ScanResult is the eventlog aggregate output envelope.
 type ScanResult struct {
-	Total    int        `json:"total"`
-	PageNo   int        `json:"pageNo"`
-	PageSize int        `json:"pageSize"`
-	HasMore  bool       `json:"hasMore"`
-	Rows     []EventRow `json:"rows"`
+	Total int        `json:"total"`
+	Rows  []EventRow `json:"rows"`
 }
 
 // EventRow is the normalized eventlog row schema.

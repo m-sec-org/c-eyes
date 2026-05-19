@@ -33,8 +33,8 @@ var (
 	}
 )
 
-// Scan collects host logs, applies deterministic filtering/sorting/pagination,
-// and returns normalized eventlog rows.
+// Scan collects host logs, applies deterministic filtering/sorting,
+// and returns all normalized eventlog rows in a single result envelope.
 func Scan(ctx context.Context, params QueryParams) (ScanResult, error) {
 	normalized, err := normalizeParams(params)
 	if err != nil {
@@ -66,18 +66,8 @@ func normalizeParams(params QueryParams) (QueryParams, error) {
 	if params.StartTime > params.EndTime {
 		return params, fmt.Errorf("invalid argument: startTime cannot be greater than endTime")
 	}
-
-	if params.PageNo == 0 {
-		params.PageNo = DefaultPageNo
-	}
-	if params.PageSize == 0 {
-		params.PageSize = DefaultPageSize
-	}
-	if params.PageNo < 1 {
-		return params, fmt.Errorf("invalid argument: pageNo must be >= 1")
-	}
-	if params.PageSize < 1 || params.PageSize > MaxPageSize {
-		return params, fmt.Errorf("invalid argument: pageSize must be between 1 and %d", MaxPageSize)
+	if params.MaxLogs < 0 {
+		return params, fmt.Errorf("invalid argument: maxLogs must be >= 0")
 	}
 
 	params.SortBy = normalizeSortBy(params.SortBy)
@@ -166,26 +156,17 @@ func buildResult(params QueryParams, events []rawEvent) ScanResult {
 	rows := normalizeEvents(events, hostInfo, params.IncludeRawContent)
 	rows = applyFilters(rows, params)
 	sortRows(rows, params.SortBy, params.SortOrder)
+	if params.MaxLogs > 0 && len(rows) > params.MaxLogs {
+		rows = rows[:params.MaxLogs]
+	}
 
 	total := len(rows)
-	start := (params.PageNo - 1) * params.PageSize
-	if start > total {
-		start = total
-	}
-	end := start + params.PageSize
-	if end > total {
-		end = total
-	}
-
-	pageRows := make([]EventRow, end-start)
-	copy(pageRows, rows[start:end])
+	allRows := make([]EventRow, total)
+	copy(allRows, rows)
 
 	return ScanResult{
-		Total:    total,
-		PageNo:   params.PageNo,
-		PageSize: params.PageSize,
-		HasMore:  end < total,
-		Rows:     pageRows,
+		Total: total,
+		Rows:  allRows,
 	}
 }
 

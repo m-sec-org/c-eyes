@@ -47,17 +47,17 @@ Web文件信息获取：`c-eyes filescan --all`
 
 指定目录信息获取： `c-eyes filescan --scan-mode path <path>`
 
-指定目录智能信息获取(只获取高危/敏感目录)： `c-eyes filescan --scan-mode path <path> --smart`
+指定目录智能信息获取 (只获取高危/敏感目录)： `c-eyes filescan --scan-mode path <path> --smart`
 
-主机日志信息获取： `c-eyes eventlog`  
+主机日志信息获取 (默认获取24h的日志)： `c-eyes eventlog` 
 
-内网主机探测： `c-eyes netscan`
+内网主机探测 (默认主接口C段扫描)： `c-eyes netscan`
 
 可访问网段探测： `c-eyes netscan -reachablesegments`
 
 软件物料清单采集：`c-eyes sbom -p <app-path>`
 
-镜像物料清单采集：`c-eyes sbom --image-target <value>`  ，支持镜像引用（如 `nginx:1.27`）、镜像归档文件（如 `D:\images\nginx.tar`）和 OCI layout 目录（如 `D:\images\nginx-oci`），
+镜像物料清单采集：`c-eyes sbom --image-target <value>`  支持镜像引用（如 nginx:1.27），镜像归档文件（如 D:\images\nginx.tar），OCI layout 目录（如 D:\images\nginx-oci）
 
 ### 风险分析
 主机异常分析： `c-eyes hostscan --all -r`
@@ -169,6 +169,7 @@ Web文件信息获取：c-eyes filescan --all
     -last <number>                查询最近多长时间段的日志(格式是时间段不是纯数字例如：30m、1h、24h、7d)
     -start-time <timestamp>       查询开始时间(格式：YYYY-MM-DD HH:MM:SS/YYYY-MM-DD HH:MM/YYYY-MM-DD)
     -end-time <timestamp>         查询结束时间(格式：YYYY-MM-DD HH:MM:SS/YYYY-MM-DD HH:MM/YYYY-MM-DD)
+    -maxLogs <number>             返回最大日志数量(不设置就没有上限，会直接输出指定时间内的所有日志)
     -eventTypes <eventType1,eventType2,...>     查询指定事件类型日志
     -eventLevels <level1,level2,...>            查询指定事件级别日志
     -keyword <text>                             查询指定关键字日志
@@ -249,13 +250,25 @@ Web文件信息获取：c-eyes filescan --all
   注意：sbom 模式仅接受 .json 输出后缀，默认输出到当前目录：result*.json ，默认内容格式：xspdx-json，兼容 spdx-json 导出
 ```
 
+## 安全开发者支持
+欢迎各位开发者和白帽子反馈工具问题，该工具很注重使用效果和用户体验，有任何问题/建议都可以进行反馈。
+
+内部反馈渠道：企微 yutianyu2
+
+外部反馈渠道：github，M-SEC 社区交流群，M-SEC 社区，邮箱
+
+感谢反馈问题/建议的朋友: ```llxler```，```Lepustimidus```，```xiyuanlu```，```Nicole-Zmo```，```ryuuz4k1```，......等
+
+
 ## 注意事项
 在 C-Eyes 工具目录下子目录 yaraRules 中，部分规则会触发杀毒软件告警，因为该目录存放的规则文件与杀软查杀规则相符，会触发杀软告警，直接加白即可，不会存在实际危害。
+
 
 ## 归属
 M-SEC 社区 ：https://msec.nsfocus.com
 
-## 附录：目前支持的检测规则
+
+## 目前支持的检测规则
 目前支持的恶意样本检测重点覆盖勒索、挖矿、僵尸网络、Webshell、C2/后门及银狐等方向，适用于hvv场景。
 
 ### 勒索：

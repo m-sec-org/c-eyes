@@ -34,6 +34,10 @@ var (
 )
 
 func collectPlatformEvents(ctx context.Context, params QueryParams) ([]rawEvent, error) {
+	if events, used, err := collectJournaldEvents(ctx, params); err == nil && used {
+		return events, nil
+	}
+
 	targets := resolveLinuxTargets(params.Sources)
 	events := make([]rawEvent, 0, 512)
 	totalTargets := len(targets)
