@@ -33,20 +33,21 @@ var (
 	protocolPattern        = regexp.MustCompile(`\b(tcp|udp|http|https|icmp|dns)\b`)
 )
 
-func collectPlatformEvents(ctx context.Context, params QueryParams) ([]rawEvent, error) {
-	if events, used, err := collectJournaldEvents(ctx, params); err == nil && used {
-		return events, nil
+func collectPlatformEvents(ctx context.Context, params QueryParams, emit rawEventSink) error {
+	if used, err := collectJournaldEvents(ctx, params, emit); err != nil {
+		return err
+	} else if used {
+		return nil
 	}
 
 	targets := resolveLinuxTargets(params.Sources)
-	events := make([]rawEvent, 0, 512)
 	totalTargets := len(targets)
 	completedTargets := 0
 
 	for _, target := range targets {
 		select {
 		case <-ctx.Done():
-			return events, ctx.Err()
+			return ctx.Err()
 		default:
 		}
 
@@ -73,7 +74,7 @@ func collectPlatformEvents(ctx context.Context, params QueryParams) ([]rawEvent,
 			select {
 			case <-ctx.Done():
 				_ = file.Close()
-				return events, ctx.Err()
+				return ctx.Err()
 			default:
 			}
 
@@ -93,7 +94,10 @@ func collectPlatformEvents(ctx context.Context, params QueryParams) ([]rawEvent,
 			localPort, remotePort := parseLinuxPorts(line)
 			protocol := parseLinuxProtocol(line)
 
-			events = append(events, rawEvent{
+			if emit == nil {
+				continue
+			}
+			if err := emit(rawEvent{
 				NativeID:    fmt.Sprintf("%s:%d", target.Path, lineNo),
 				Timestamp:   timestamp,
 				OSType:      "linux",
@@ -118,7 +122,10 @@ func collectPlatformEvents(ctx context.Context, params QueryParams) ([]rawEvent,
 					"lineNo":    lineNo,
 					"line":      line,
 				},
-			})
+			}); err != nil {
+				_ = file.Close()
+				return err
+			}
 		}
 		_ = file.Close()
 
@@ -128,7 +135,7 @@ func collectPlatformEvents(ctx context.Context, params QueryParams) ([]rawEvent,
 		}
 	}
 
-	return events, nil
+	return nil
 }
 
 func resolveLinuxTargets(sources []string) []linuxLogTarget {
@@ -222,22 +229,22 @@ func parseLinuxProcessContext(line string) (string, *int) {
 
 func parseLinuxEventCode(line string) string {
 	if matches := eventCodePattern.FindStringSubmatch(line); len(matches) == 2 {
-		return strings.TrimSpace(matches[1])
+		return trimEventToken(matches[1])
 	}
 	if matches := auditTypePattern.FindStringSubmatch(line); len(matches) == 2 {
-		return strings.TrimSpace(matches[1])
+		return trimEventToken(matches[1])
 	}
 	return "unknown"
 }
 
 func parseLinuxTargetPath(line string) string {
 	if matches := targetPathPattern.FindStringSubmatch(line); len(matches) == 2 {
-		return strings.TrimSpace(matches[1])
+		return trimEventToken(matches[1])
 	}
 	parts := strings.Fields(line)
 	for _, part := range parts {
 		if strings.Contains(part, "/") {
-			candidate := strings.Trim(part, "\"' ,;")
+			candidate := trimEventToken(part)
 			if candidate == "/" {
 				continue
 			}

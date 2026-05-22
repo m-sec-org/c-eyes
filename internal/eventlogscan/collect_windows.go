@@ -81,16 +81,15 @@ var windowsSecurityMessageSummary = map[string]string{
 	"4798": "A user's local group membership was enumerated.",
 }
 
-func collectPlatformEvents(ctx context.Context, params QueryParams) ([]rawEvent, error) {
+func collectPlatformEvents(ctx context.Context, params QueryParams, emit rawEventSink) error {
 	channels := resolveWindowsChannels(params.Sources)
-	events := make([]rawEvent, 0, 512)
 	totalChannels := len(channels)
 	completedChannels := 0
 
 	for _, channel := range channels {
 		select {
 		case <-ctx.Done():
-			return events, ctx.Err()
+			return ctx.Err()
 		default:
 		}
 
@@ -110,7 +109,7 @@ func collectPlatformEvents(ctx context.Context, params QueryParams) ([]rawEvent,
 			select {
 			case <-ctx.Done():
 				_ = closeEventLog(handle)
-				return events, ctx.Err()
+				return ctx.Err()
 			default:
 			}
 
@@ -156,7 +155,12 @@ func collectPlatformEvents(ctx context.Context, params QueryParams) ([]rawEvent,
 				payload := buffer[offset:next]
 				parsed := parseWindowsRecord(channel, payload, rec)
 				parsed.Timestamp = timestamp
-				events = append(events, parsed)
+				if emit != nil {
+					if err := emit(parsed); err != nil {
+						_ = closeEventLog(handle)
+						return err
+					}
+				}
 
 				offset = next
 			}
@@ -170,7 +174,7 @@ func collectPlatformEvents(ctx context.Context, params QueryParams) ([]rawEvent,
 		}
 	}
 
-	return events, nil
+	return nil
 }
 
 func resolveWindowsChannels(sources []string) []string {

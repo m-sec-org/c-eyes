@@ -7,8 +7,8 @@ import (
 	"fmt"
 )
 
-func collectPlatformEvents(ctx context.Context, params QueryParams) ([]rawEvent, error) {
+func collectPlatformEvents(ctx context.Context, params QueryParams, _ rawEventSink) error {
 	_ = ctx
 	_ = params
-	return nil, fmt.Errorf("eventlog collection is not supported on this operating system")
+	return fmt.Errorf("eventlog collection is not supported on this operating system")
 }

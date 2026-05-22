@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -20,7 +21,8 @@ const (
 )
 
 var (
-	allowedSortBy = map[string]struct{}{
+	ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
+	allowedSortBy     = map[string]struct{}{
 		"timestamp":   {},
 		"eventlevel":  {},
 		"source":      {},
@@ -33,27 +35,29 @@ var (
 	}
 )
 
-// Scan collects host logs, applies deterministic filtering/sorting,
-// and returns all normalized eventlog rows in a single result envelope.
+// Scan is a compatibility wrapper that materializes Export output into memory.
 func Scan(ctx context.Context, params QueryParams) (ScanResult, error) {
-	normalized, err := normalizeParams(params)
+	exported, err := Export(ctx, params)
 	if err != nil {
 		return ScanResult{}, err
 	}
-	if normalized.Progress != nil {
-		normalized.Progress(0, 1, "collect_events")
-	}
+	defer func() { _ = exported.Close() }()
 
-	events, err := collectPlatformEvents(ctx, normalized)
+	iter, err := exported.OpenRows()
+	if err != nil {
+		return ScanResult{}, err
+	}
+	defer func() { _ = iter.Close() }()
+
+	rows, err := readAllEventRows(iter)
 	if err != nil {
 		return ScanResult{}, err
 	}
 
-	result := buildResult(normalized, events)
-	if normalized.Progress != nil {
-		normalized.Progress(1, 1, "complete")
-	}
-	return result, nil
+	return ScanResult{
+		Total: exported.Total,
+		Rows:  rows,
+	}, nil
 }
 
 func normalizeParams(params QueryParams) (QueryParams, error) {
@@ -151,6 +155,30 @@ func trimStringPtr(ptr *string) *string {
 	return &trimmed
 }
 
+func cleanEventText(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	cleaned := ansiEscapePattern.ReplaceAllString(raw, "")
+	cleaned = strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n' || r == '\r' || r == '\t':
+			return ' '
+		case r < 0x20 || r == 0x7f:
+			return -1
+		default:
+			return r
+		}
+	}, cleaned)
+	return strings.Join(strings.Fields(cleaned), " ")
+}
+
+func trimEventToken(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	trimmed = strings.Trim(trimmed, "\"'`,;:)]} ")
+	return strings.TrimSpace(trimmed)
+}
+
 func buildResult(params QueryParams, events []rawEvent) ScanResult {
 	hostInfo, _ := processscan.GetHostInfo()
 	rows := normalizeEvents(events, hostInfo, params.IncludeRawContent)
@@ -173,51 +201,60 @@ func buildResult(params QueryParams, events []rawEvent) ScanResult {
 func normalizeEvents(events []rawEvent, host processscan.HostInfo, includeRaw bool) []EventRow {
 	rows := make([]EventRow, 0, len(events))
 	for _, event := range events {
-		row := EventRow{
-			Timestamp: event.Timestamp,
-			OSType:    normalizeOSType(event.OSType),
-			Source:    normalizeSource(event.Source),
-		}
-		if row.Timestamp <= 0 {
+		row, ok := normalizeEvent(event, host, includeRaw)
+		if !ok {
 			continue
 		}
-
-		row.EventType = normalizeEventType(event.EventType, row.Source, event.Message)
-		row.EventLevel = normalizeEventLevel(event.EventLevel, event.Message)
-		row.EventCode = normalizeEventCode(event.EventCode)
-		row.EventAction = normalizeEventAction(event.EventAction, event.Message)
-		row.Result = normalizeResult(event.Result, event.Message)
-
-		row.Hostname = firstNonEmptyPtr(event.Hostname, host.Hostname)
-		row.DisplayIP = resolveDisplayIP(event.DisplayIP, host.DisplayIP)
-		row.InternalIPList = resolveIPList(event.InternalIPs, host.InternalIPs)
-		row.ExternalIPList = resolveIPList(event.ExternalIPs, host.ExternalIPs)
-
-		row.Username = optionalString(event.Username)
-		row.ProcessName = optionalString(event.ProcessName)
-		row.ProcessID = cloneIntPtr(event.ProcessID)
-		row.ParentProcessName = optionalString(event.ParentProcName)
-		row.ParentProcessID = cloneIntPtr(event.ParentProcID)
-		row.TargetPath = optionalString(event.TargetPath)
-		row.LocalIP = optionalString(event.LocalIP)
-		row.LocalPort = cloneIntPtr(event.LocalPort)
-		row.RemoteIP = optionalString(event.RemoteIP)
-		row.RemotePort = cloneIntPtr(event.RemotePort)
-		row.Protocol = optionalString(normalizeProtocol(event.Protocol))
-		row.Message = optionalString(event.Message)
-
-		if includeRaw {
-			if event.RawContent == nil {
-				row.RawContent = map[string]any{}
-			} else {
-				row.RawContent = sanitizeRawContent(event.RawContent)
-			}
-		}
-
-		row.LogID = generateLogID(event, row)
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+func normalizeEvent(event rawEvent, host processscan.HostInfo, includeRaw bool) (EventRow, bool) {
+	cleanMessage := cleanEventText(event.Message)
+	row := EventRow{
+		Timestamp: event.Timestamp,
+		OSType:    normalizeOSType(event.OSType),
+		Source:    normalizeSource(event.Source),
+	}
+	if row.Timestamp <= 0 {
+		return EventRow{}, false
+	}
+
+	row.EventType = normalizeEventType(event.EventType, row.Source, cleanMessage)
+	row.EventLevel = normalizeEventLevel(event.EventLevel, cleanMessage)
+	row.EventCode = normalizeEventCode(event.EventCode)
+	row.EventAction = normalizeEventAction(event.EventAction, cleanMessage)
+	row.Result = normalizeResult(event.Result, cleanMessage)
+
+	row.Hostname = firstNonEmptyPtr(event.Hostname, host.Hostname)
+	row.DisplayIP = resolveDisplayIP(event.DisplayIP, host.DisplayIP)
+	row.InternalIPList = resolveIPList(event.InternalIPs, host.InternalIPs)
+	row.ExternalIPList = resolveIPList(event.ExternalIPs, host.ExternalIPs)
+
+	row.Username = optionalString(event.Username)
+	row.ProcessName = optionalString(event.ProcessName)
+	row.ProcessID = cloneIntPtr(event.ProcessID)
+	row.ParentProcessName = optionalString(event.ParentProcName)
+	row.ParentProcessID = cloneIntPtr(event.ParentProcID)
+	row.TargetPath = optionalString(event.TargetPath)
+	row.LocalIP = optionalString(event.LocalIP)
+	row.LocalPort = cloneIntPtr(event.LocalPort)
+	row.RemoteIP = optionalString(event.RemoteIP)
+	row.RemotePort = cloneIntPtr(event.RemotePort)
+	row.Protocol = optionalString(normalizeProtocol(event.Protocol))
+	row.Message = optionalString(cleanMessage)
+
+	if includeRaw {
+		if event.RawContent == nil {
+			row.RawContent = map[string]any{}
+		} else {
+			row.RawContent = sanitizeRawContent(event.RawContent)
+		}
+	}
+
+	row.LogID = generateLogID(event, row)
+	return row, true
 }
 
 func normalizeOSType(raw string) string {
@@ -290,12 +327,21 @@ func normalizeEventType(raw, source, message string) string {
 }
 
 func inferEventTypeFromMessage(source, message string) string {
-	lower := strings.ToLower(source + " " + message)
+	lower := strings.ToLower(strings.TrimSpace(message))
 	switch {
+	case strings.Contains(lower, ".target"),
+		strings.Contains(lower, ".service"),
+		strings.Contains(lower, ".scope"),
+		strings.Contains(lower, "systemd"):
+		return "service"
 	case strings.Contains(lower, "logon"),
+		strings.Contains(lower, "log on"),
 		strings.Contains(lower, "login"),
-		strings.Contains(lower, "auth"),
-		strings.Contains(lower, "ssh"):
+		strings.Contains(lower, "logged on"),
+		strings.Contains(lower, "logged in"),
+		strings.Contains(lower, "ssh"),
+		strings.Contains(lower, "accepted password"),
+		strings.Contains(lower, "session opened"):
 		return "login"
 	case strings.Contains(lower, "process"),
 		strings.Contains(lower, "exec"),
@@ -335,25 +381,40 @@ func inferEventTypeFromMessage(source, message string) string {
 
 func normalizeEventLevel(raw, message string) string {
 	key := strings.ToLower(strings.TrimSpace(raw))
+	level := ""
 	switch key {
 	case "debug":
-		return "debug"
+		level = "debug"
 	case "info", "information":
-		return "info"
+		level = "info"
 	case "notice":
-		return "notice"
+		level = "notice"
 	case "warn", "warning":
-		return "warn"
+		level = "warn"
 	case "error", "err":
-		return "error"
+		level = "error"
 	case "critical", "crit":
-		return "critical"
+		level = "critical"
 	case "fatal":
-		return "fatal"
+		level = "fatal"
 	case "other":
-		return "other"
+		level = "other"
 	}
 
+	inferred := inferMessageLevel(message)
+	if level == "" {
+		if inferred != "" {
+			return inferred
+		}
+		return "other"
+	}
+	if inferred != "" && levelRank(inferred) > levelRank(level) {
+		return inferred
+	}
+	return level
+}
+
+func inferMessageLevel(message string) string {
 	lower := strings.ToLower(message)
 	switch {
 	case strings.Contains(lower, "fatal"):
@@ -371,7 +432,7 @@ func normalizeEventLevel(raw, message string) string {
 	case lower != "":
 		return "info"
 	default:
-		return "other"
+		return ""
 	}
 }
 
@@ -398,25 +459,64 @@ func normalizeEventAction(raw, message string) string {
 	switch {
 	case strings.Contains(lower, "create"):
 		return "create"
+	case strings.Contains(lower, "session closed"),
+		strings.Contains(lower, "logged out"),
+		strings.Contains(lower, "removed session"):
+		return "logout"
 	case strings.Contains(lower, "modify"), strings.Contains(lower, "change"), strings.Contains(lower, "update"):
 		return "modify"
 	case strings.Contains(lower, "delete"), strings.Contains(lower, "remove"), strings.Contains(lower, "unlink"):
 		return "delete"
 	case strings.Contains(lower, "start"), strings.Contains(lower, "launch"):
 		return "start"
+	case strings.Contains(lower, "finished "), strings.Contains(lower, "reached target"):
+		return "start"
+	case strings.Contains(lower, "listening on "):
+		return "start"
+	case strings.Contains(lower, "acquired the name "):
+		return "allow"
+	case strings.Contains(lower, "loading rules from directory"):
+		return "read"
+	case strings.Contains(lower, "activating via systemd"):
+		return "start"
+	case strings.Contains(lower, "loading "), strings.Contains(lower, "loaded "):
+		if strings.Contains(lower, " directory") || strings.Contains(lower, " file") || strings.Contains(lower, " path") {
+			return "read"
+		}
+		return "other"
+	case strings.Contains(lower, "new seat"):
+		return "start"
+	case strings.Contains(lower, "new session"):
+		return "login"
+	case strings.Contains(lower, "deactivated"):
+		return "stop"
+	case strings.Contains(lower, "exiting after"):
+		return "stop"
+	case strings.Contains(lower, "powering down"),
+		strings.Contains(lower, "power off now"):
+		return "stop"
+	case strings.Contains(lower, "stopped "):
+		return "stop"
 	case strings.Contains(lower, "stop"), strings.Contains(lower, "shutdown"):
 		return "stop"
-	case strings.Contains(lower, "connect"), strings.Contains(lower, "accept"):
-		return "connect"
-	case strings.Contains(lower, "logon"), strings.Contains(lower, "login"), strings.Contains(lower, "signin"):
+	case strings.Contains(lower, "logon"),
+		strings.Contains(lower, "log on"),
+		strings.Contains(lower, "login"),
+		strings.Contains(lower, "logged on"),
+		strings.Contains(lower, "logged in"),
+		strings.Contains(lower, "signin"),
+		strings.Contains(lower, "accepted password"),
+		strings.Contains(lower, "session opened"):
 		return "login"
+	case strings.Contains(lower, "connect"):
+		return "connect"
 	case strings.Contains(lower, "logout"), strings.Contains(lower, "signout"):
 		return "logout"
 	case strings.Contains(lower, "read"):
 		return "read"
 	case strings.Contains(lower, "write"):
 		return "write"
-	case strings.Contains(lower, "exec"), strings.Contains(lower, "run"):
+	case strings.Contains(lower, "exec"), strings.Contains(lower, "execute"), strings.Contains(lower, "spawn"):
 		return "execute"
 	case strings.Contains(lower, "allow"), strings.Contains(lower, "accepted"), strings.Contains(lower, "success"):
 		return "allow"
@@ -441,15 +541,39 @@ func normalizeResult(raw, message string) string {
 	lower := strings.ToLower(message)
 	switch {
 	case strings.Contains(lower, "fail"),
+		strings.Contains(lower, "faulty module"),
 		strings.Contains(lower, "denied"),
 		strings.Contains(lower, "blocked"),
+		strings.Contains(lower, "could not"),
 		strings.Contains(lower, "error"),
+		strings.Contains(lower, "exiting after"),
+		strings.Contains(lower, "no such file or directory"),
 		strings.Contains(lower, "reject"):
 		return "fail"
 	case strings.Contains(lower, "success"),
 		strings.Contains(lower, "accepted"),
 		strings.Contains(lower, "allowed"),
-		strings.Contains(lower, "ok"):
+		strings.Contains(lower, "ok"),
+		strings.Contains(lower, "deactivated successfully"),
+		strings.Contains(lower, "loading rules from directory"),
+		strings.Contains(lower, "activating via systemd"),
+		strings.Contains(lower, "powering down"),
+		strings.Contains(lower, "power off now"),
+		strings.Contains(lower, "stopped "),
+		strings.Contains(lower, "listening on "),
+		strings.Contains(lower, "acquired the name "),
+		strings.Contains(lower, "reached target"),
+		strings.Contains(lower, "started "),
+		strings.Contains(lower, "finished "),
+		strings.Contains(lower, "new seat"),
+		strings.Contains(lower, "new session"),
+		strings.Contains(lower, "session closed"),
+		strings.Contains(lower, "logged out"),
+		strings.Contains(lower, "removed session"),
+		strings.Contains(lower, "root login on"),
+		strings.Contains(lower, "session opened"),
+		strings.Contains(lower, "accepted password"),
+		strings.Contains(lower, "logged in"):
 		return "success"
 	default:
 		return "unknown"
@@ -542,82 +666,110 @@ func applyFilters(rows []EventRow, params QueryParams) []EventRow {
 		return rows
 	}
 
-	sourcesSet := listToSet(params.Sources)
-	eventTypesSet := listToSet(params.EventTypes)
-	eventLevelsSet := listToSet(params.EventLevels)
-	eventCodesSet := listToSet(params.EventCodes)
-	eventActionsSet := listToSet(params.EventActions)
-	resultsSet := listToSet(params.Results)
-	protocolsSet := listToSet(params.Protocols)
-
-	processName := normalizedNeedle(params.ProcessName)
-	username := normalizedNeedle(params.Username)
-	targetPath := normalizedNeedle(params.TargetPath)
-	localIP := normalizedNeedle(params.LocalIP)
-	remoteIP := normalizedNeedle(params.RemoteIP)
-	keyword := normalizedNeedle(params.Keyword)
+	state := newFilterState(params)
 
 	out := make([]EventRow, 0, len(rows))
 	for _, row := range rows {
-		if !matchesSet(row.Source, sourcesSet) {
-			continue
-		}
-		if !matchesSet(row.EventType, eventTypesSet) {
-			continue
-		}
-		if !matchesSet(row.EventLevel, eventLevelsSet) {
-			continue
-		}
-		if !matchesSet(row.EventCode, eventCodesSet) {
-			continue
-		}
-		if !matchesSet(row.EventAction, eventActionsSet) {
-			continue
-		}
-		if !matchesSet(row.Result, resultsSet) {
-			continue
-		}
-		if !matchesSet(ptrString(row.Protocol), protocolsSet) {
-			continue
-		}
-
-		if processName != "" && !containsFold(ptrString(row.ProcessName), processName) {
-			continue
-		}
-		if username != "" && !containsFold(ptrString(row.Username), username) {
-			continue
-		}
-		if targetPath != "" && !containsFold(ptrString(row.TargetPath), targetPath) {
-			continue
-		}
-		if localIP != "" && !containsFold(ptrString(row.LocalIP), localIP) {
-			continue
-		}
-		if remoteIP != "" && !containsFold(ptrString(row.RemoteIP), remoteIP) {
-			continue
-		}
-		if params.ProcessID != nil {
-			if row.ProcessID == nil || *row.ProcessID != *params.ProcessID {
-				continue
-			}
-		}
-		if params.LocalPort != nil {
-			if row.LocalPort == nil || *row.LocalPort != *params.LocalPort {
-				continue
-			}
-		}
-		if params.RemotePort != nil {
-			if row.RemotePort == nil || *row.RemotePort != *params.RemotePort {
-				continue
-			}
-		}
-		if keyword != "" && !matchesKeyword(row, keyword) {
+		if !state.matches(row) {
 			continue
 		}
 
 		out = append(out, row)
 	}
 	return out
+}
+
+type filterState struct {
+	sourcesSet      map[string]struct{}
+	eventTypesSet   map[string]struct{}
+	eventLevelsSet  map[string]struct{}
+	eventCodesSet   map[string]struct{}
+	eventActionsSet map[string]struct{}
+	resultsSet      map[string]struct{}
+	protocolsSet    map[string]struct{}
+	processName     string
+	username        string
+	targetPath      string
+	localIP         string
+	remoteIP        string
+	keyword         string
+	processID       *int
+	localPort       *int
+	remotePort      *int
+}
+
+func newFilterState(params QueryParams) filterState {
+	return filterState{
+		sourcesSet:      listToSet(params.Sources),
+		eventTypesSet:   listToSet(params.EventTypes),
+		eventLevelsSet:  listToSet(params.EventLevels),
+		eventCodesSet:   listToSet(params.EventCodes),
+		eventActionsSet: listToSet(params.EventActions),
+		resultsSet:      listToSet(params.Results),
+		protocolsSet:    listToSet(params.Protocols),
+		processName:     normalizedNeedle(params.ProcessName),
+		username:        normalizedNeedle(params.Username),
+		targetPath:      normalizedNeedle(params.TargetPath),
+		localIP:         normalizedNeedle(params.LocalIP),
+		remoteIP:        normalizedNeedle(params.RemoteIP),
+		keyword:         normalizedNeedle(params.Keyword),
+		processID:       params.ProcessID,
+		localPort:       params.LocalPort,
+		remotePort:      params.RemotePort,
+	}
+}
+
+func (s filterState) matches(row EventRow) bool {
+	if !matchesSet(row.Source, s.sourcesSet) {
+		return false
+	}
+	if !matchesSet(row.EventType, s.eventTypesSet) {
+		return false
+	}
+	if !matchesSet(row.EventLevel, s.eventLevelsSet) {
+		return false
+	}
+	if !matchesSet(row.EventCode, s.eventCodesSet) {
+		return false
+	}
+	if !matchesSet(row.EventAction, s.eventActionsSet) {
+		return false
+	}
+	if !matchesSet(row.Result, s.resultsSet) {
+		return false
+	}
+	if !matchesSet(ptrString(row.Protocol), s.protocolsSet) {
+		return false
+	}
+
+	if s.processName != "" && !containsFold(ptrString(row.ProcessName), s.processName) {
+		return false
+	}
+	if s.username != "" && !containsFold(ptrString(row.Username), s.username) {
+		return false
+	}
+	if s.targetPath != "" && !containsFold(ptrString(row.TargetPath), s.targetPath) {
+		return false
+	}
+	if s.localIP != "" && !containsFold(ptrString(row.LocalIP), s.localIP) {
+		return false
+	}
+	if s.remoteIP != "" && !containsFold(ptrString(row.RemoteIP), s.remoteIP) {
+		return false
+	}
+	if s.processID != nil && (row.ProcessID == nil || *row.ProcessID != *s.processID) {
+		return false
+	}
+	if s.localPort != nil && (row.LocalPort == nil || *row.LocalPort != *s.localPort) {
+		return false
+	}
+	if s.remotePort != nil && (row.RemotePort == nil || *row.RemotePort != *s.remotePort) {
+		return false
+	}
+	if s.keyword != "" && !matchesKeyword(row, s.keyword) {
+		return false
+	}
+	return true
 }
 
 func listToSet(items []string) map[string]struct{} {

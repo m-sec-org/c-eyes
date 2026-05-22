@@ -47,14 +47,14 @@ var linuxJournalFields = []string{
 	"PRIORITY",
 }
 
-func collectJournaldEvents(ctx context.Context, params QueryParams) ([]rawEvent, bool, error) {
+func collectJournaldEvents(ctx context.Context, params QueryParams, emit rawEventSink) (bool, error) {
 	if !journalStorageAvailable() {
-		return nil, false, nil
+		return false, nil
 	}
 
 	var journal *C.sd_journal
 	if rc := int(C.sd_journal_open(&journal, 0)); rc < 0 || journal == nil {
-		return nil, false, nil
+		return false, nil
 	}
 	defer C.sd_journal_close(journal)
 
@@ -63,20 +63,19 @@ func collectJournaldEvents(ctx context.Context, params QueryParams) ([]rawEvent,
 	}
 
 	if rc := int(C.sd_journal_seek_tail(journal)); rc < 0 {
-		return nil, false, nil
+		return false, nil
 	}
 
-	events := make([]rawEvent, 0, 512)
 	for {
 		select {
 		case <-ctx.Done():
-			return events, true, ctx.Err()
+			return true, ctx.Err()
 		default:
 		}
 
 		rc := int(C.sd_journal_previous(journal))
 		if rc < 0 {
-			return nil, false, nil
+			return false, nil
 		}
 		if rc == 0 {
 			break
@@ -107,17 +106,18 @@ func collectJournaldEvents(ctx context.Context, params QueryParams) ([]rawEvent,
 		if cursor, ok := journalCursor(journal); ok && cursor != "" {
 			event.NativeID = "journal:" + cursor
 		}
-		events = append(events, event)
+		if emit != nil {
+			if err := emit(event); err != nil {
+				return true, err
+			}
+		}
 	}
 
 	if params.Progress != nil {
 		params.Progress(1, 1, "collect_journald")
 	}
 
-	if len(events) == 0 {
-		return nil, false, nil
-	}
-	return events, true, nil
+	return true, nil
 }
 
 func journalStorageAvailable() bool {

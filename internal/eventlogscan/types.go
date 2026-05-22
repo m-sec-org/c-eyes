@@ -10,6 +10,29 @@ const (
 // ProgressFunc reports collection/query progress.
 type ProgressFunc func(done, total int, stage string)
 
+type rawEventSink func(rawEvent) error
+
+// RowSink receives normalized rows during streaming export.
+type RowSink func(EventRow) error
+
+// RowIterator streams normalized rows from a disk-backed source.
+type RowIterator interface {
+	Next() (EventRow, bool, error)
+	Close() error
+}
+
+// RowWriter consumes normalized rows and persists them somewhere.
+type RowWriter interface {
+	Write(EventRow) error
+	Close() error
+}
+
+// ChunkMeta describes a persisted sorted chunk.
+type ChunkMeta struct {
+	Path string
+	Rows int
+}
+
 // QueryParams describes eventlog query inputs.
 type QueryParams struct {
 	StartTime int64
@@ -43,10 +66,31 @@ type QueryParams struct {
 	Progress          ProgressFunc
 }
 
-// ScanResult is the eventlog aggregate output envelope.
+// ScanResult is the compatibility envelope for materialized eventlog results.
 type ScanResult struct {
 	Total int        `json:"total"`
 	Rows  []EventRow `json:"rows"`
+}
+
+// ExportResult is a disk-backed ordered export of eventlog rows.
+type ExportResult struct {
+	Total     int
+	RowsPath  string
+	SpoolDir  string
+	SortBy    string
+	SortOrder string
+	MaxLogs   int
+	closeFn   func() error
+}
+
+// Close removes any temporary export artifacts.
+func (r *ExportResult) Close() error {
+	if r == nil || r.closeFn == nil {
+		return nil
+	}
+	closeFn := r.closeFn
+	r.closeFn = nil
+	return closeFn()
 }
 
 // EventRow is the normalized eventlog row schema.

@@ -5,7 +5,6 @@ package riskanalysis
 /*
 #cgo windows CFLAGS: -I${SRCDIR}/../../third_party/yara-x-dist/include
 #cgo windows LDFLAGS: -L${SRCDIR}/../../third_party/yara-x-dist/lib -lyara_x_capi
-#cgo !windows pkg-config: yara_x_capi
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdbool.h>

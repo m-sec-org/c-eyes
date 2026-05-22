@@ -9,6 +9,7 @@ import (
 )
 
 var (
+	journalCommQuotedPattern = regexp.MustCompile(`\bcomm=\"([^\"]+)`)
 	journalEventCodePattern  = regexp.MustCompile(`\b(?:eventid|event_id|id|code)=([A-Za-z0-9_.-]+)\b`)
 	journalAuditTypePattern  = regexp.MustCompile(`\btype=([A-Za-z0-9_.-]+)\b`)
 	journalTargetPathPattern = regexp.MustCompile(`\b(?:path|file|filename|exe|cmd|cwd)=["']?([^"'\s]+)`)
@@ -61,7 +62,7 @@ func normalizeLinuxJournalActualSource(fields map[string]string) string {
 }
 
 func buildLinuxJournalEvent(fields map[string]string, timestamp int64, source string) rawEvent {
-	message := strings.TrimSpace(fields["MESSAGE"])
+	message := cleanEventText(fields["MESSAGE"])
 	processName := firstNonEmptyJournalValue(fields["_EXE"], fields["_COMM"], fields["SYSLOG_IDENTIFIER"], fields["_SYSTEMD_UNIT"])
 	processID := parseJournalPID(fields["_PID"])
 	username := lookupJournalUsername(fields["_UID"])
@@ -73,6 +74,7 @@ func buildLinuxJournalEvent(fields map[string]string, timestamp int64, source st
 		OSType:      "linux",
 		Source:      source,
 		EventLevel:  mapLinuxJournalPriority(fields["PRIORITY"]),
+		EventType:   journalEventType(fields, message, source),
 		EventCode:   parseLinuxJournalEventCode(fields, message),
 		Hostname:    strings.TrimSpace(fields["_HOSTNAME"]),
 		ProcessName: processName,
@@ -100,6 +102,70 @@ func buildLinuxJournalEvent(fields map[string]string, timestamp int64, source st
 			"message":          message,
 		},
 	}
+}
+
+func journalEventType(fields map[string]string, message, source string) string {
+	unit := strings.ToLower(strings.TrimSpace(fields["_SYSTEMD_UNIT"]))
+	identifier := strings.ToLower(strings.TrimSpace(fields["SYSLOG_IDENTIFIER"]))
+	comm := strings.ToLower(strings.TrimSpace(fields["_COMM"]))
+	lower := strings.ToLower(strings.TrimSpace(message))
+	normSource := normalizeSource(source)
+	targetPath := journalParseLinuxTargetPath(message)
+
+	if strings.Contains(lower, "powering down") || strings.Contains(lower, "power off now") {
+		return "system"
+	}
+	if strings.Contains(lower, "new seat") {
+		return "system"
+	}
+
+	if normSource == "auth" || normSource == "security" || normSource == "audit" {
+		if strings.Contains(lower, "logon") ||
+			strings.Contains(lower, "login") ||
+			strings.Contains(lower, "ssh") ||
+			strings.Contains(lower, "accepted password") ||
+			strings.Contains(lower, "new session") ||
+			strings.Contains(lower, "session closed") ||
+			strings.Contains(lower, "session opened") ||
+			strings.Contains(lower, "logged out") ||
+			strings.Contains(lower, "removed session") ||
+			strings.Contains(identifier, "sshd") ||
+			strings.Contains(identifier, "login") ||
+			strings.Contains(comm, "login") {
+			return "login"
+		}
+	}
+
+	switch {
+	case targetPath != "" && (strings.Contains(lower, "loading rules from directory") || strings.Contains(lower, "loaded from directory")):
+		return "file"
+	case strings.HasSuffix(unit, ".service"),
+		strings.HasSuffix(unit, ".scope"),
+		strings.HasSuffix(unit, ".target"),
+		strings.HasSuffix(unit, ".socket"),
+		strings.Contains(identifier, "systemd"),
+		strings.Contains(comm, "systemd"),
+		strings.Contains(lower, "listening on "),
+		strings.Contains(lower, "acquired the name "),
+		strings.Contains(lower, "reached target"),
+		strings.Contains(lower, "startup finished"),
+		strings.Contains(lower, "started "),
+		strings.Contains(lower, "finished "):
+		return "service"
+	case strings.Contains(lower, "connect"),
+		strings.Contains(lower, "socket"),
+		strings.Contains(lower, " tcp "),
+		strings.Contains(lower, " udp "),
+		strings.Contains(lower, "http"),
+		strings.Contains(identifier, "network"):
+		return "network"
+	case strings.Contains(lower, "process"),
+		strings.Contains(lower, "exec"),
+		strings.Contains(lower, "pid="):
+		return "process"
+	}
+
+	return ""
 }
 
 func firstNonEmptyJournalValue(values ...string) string {
@@ -169,22 +235,25 @@ func parseLinuxJournalEventCode(fields map[string]string, message string) string
 
 func journalParseLinuxEventCode(line string) string {
 	if matches := journalEventCodePattern.FindStringSubmatch(line); len(matches) == 2 {
-		return strings.TrimSpace(matches[1])
+		return trimEventToken(matches[1])
 	}
 	if matches := journalAuditTypePattern.FindStringSubmatch(line); len(matches) == 2 {
-		return strings.TrimSpace(matches[1])
+		return trimEventToken(matches[1])
 	}
 	return "unknown"
 }
 
 func journalParseLinuxTargetPath(line string) string {
+	if matches := journalCommQuotedPattern.FindStringSubmatch(line); len(matches) == 2 {
+		return trimEventToken(matches[1])
+	}
 	if matches := journalTargetPathPattern.FindStringSubmatch(line); len(matches) == 2 {
-		return strings.TrimSpace(matches[1])
+		return trimEventToken(matches[1])
 	}
 	parts := strings.Fields(line)
 	for _, part := range parts {
 		if strings.Contains(part, "/") {
-			candidate := strings.Trim(part, "\"' ,;")
+			candidate := trimEventToken(part)
 			if candidate == "/" {
 				continue
 			}

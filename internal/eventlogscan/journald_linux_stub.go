@@ -4,6 +4,6 @@ package eventlogscan
 
 import "context"
 
-func collectJournaldEvents(_ context.Context, _ QueryParams) ([]rawEvent, bool, error) {
-	return nil, false, nil
+func collectJournaldEvents(_ context.Context, _ QueryParams, _ rawEventSink) (bool, error) {
+	return false, nil
 }

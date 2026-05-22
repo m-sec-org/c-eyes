@@ -20,6 +20,7 @@ $bin = Join-Path $yaraBase "bin"
 $localToolchainBin = Join-Path $root "third_party\toolchain\mingw64\bin"
 $localGcc = Join-Path $localToolchainBin "gcc.exe"
 $localGpp = Join-Path $localToolchainBin "g++.exe"
+$localPkgconf = Join-Path $localToolchainBin "pkgconf.exe"
 
 if (-not (Test-Path $include) -or -not (Test-Path $lib) -or -not (Test-Path $bin)) {
     throw "yara-x-dist not found. Expected $yaraBase."
@@ -73,6 +74,9 @@ if ($Offline) {
 if (Test-Path $localGpp) {
     $env:CXX = $localGpp
 }
+if (Test-Path $localPkgconf) {
+    $env:PKG_CONFIG = $localPkgconf
+}
 if ($compilerSource -eq "project") {
     $env:PATH = "$localToolchainBin;$bin;$env:PATH"
 } else {
@@ -80,6 +84,12 @@ if ($compilerSource -eq "project") {
 }
 
 $outDir = Join-Path $root $OutputDir
+$goBuildCache = Join-Path $root "tmp\\go-build-cache"
+New-Item -ItemType Directory -Force $goBuildCache | Out-Null
+if (-not $env:GOCACHE) {
+    $env:GOCACHE = $goBuildCache
+}
+
 New-Item -ItemType Directory -Force $outDir | Out-Null
 if (-not $CopyRules) {
     $rulesDir = Join-Path $outDir "rules"
@@ -99,8 +109,15 @@ $exe = Join-Path $outDir "c-eyes.exe"
 Push-Location $root
 try {
     go build -tags yarax -o $exe .\cmd\edr
+    if ($LASTEXITCODE -ne 0) {
+        throw "go build failed with exit code $LASTEXITCODE"
+    }
 } finally {
     Pop-Location
+}
+
+if (-not (Test-Path $exe)) {
+    throw "expected build output not found: $exe"
 }
 
 if ($LinkMode -eq "dynamic") {

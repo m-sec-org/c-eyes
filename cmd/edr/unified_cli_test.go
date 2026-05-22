@@ -11,6 +11,8 @@ import (
 	"fmt"
 
 	"io"
+	"net/http"
+	"net/http/httptest"
 
 	"os"
 
@@ -30,8 +32,9 @@ import (
 
 	"edrsystem/internal/benchmark"
 	"edrsystem/internal/eventlogscan"
-	"edrsystem/internal/riskanalysis"
 	"edrsystem/internal/sbom"
+
+	"edrsystem/internal/riskanalysis"
 
 	"github.com/xuri/excelize/v2"
 )
@@ -1626,166 +1629,6 @@ func TestWriteShardedXLSXFilesSinglePartKeepsOriginalName(t *testing.T) {
 
 }
 
-func TestRunEventlogCLIWritesEventlogOutputFile(t *testing.T) {
-	originalScan := eventlogScanFunc
-
-	eventlogScanFunc = func(context.Context, eventlogscan.QueryParams) (eventlogscan.ScanResult, error) {
-		return eventlogscan.ScanResult{
-			Total: 3,
-			Rows: []eventlogscan.EventRow{
-				{LogID: "a", Timestamp: 3, Source: "system", EventType: "system", EventLevel: "info", EventCode: "1", EventAction: "start", Result: "success", OSType: "linux", InternalIPList: []string{}, ExternalIPList: []string{}},
-				{LogID: "b", Timestamp: 2, Source: "system", EventType: "system", EventLevel: "info", EventCode: "2", EventAction: "start", Result: "success", OSType: "linux", InternalIPList: []string{}, ExternalIPList: []string{}},
-				{LogID: "c", Timestamp: 1, Source: "system", EventType: "system", EventLevel: "info", EventCode: "3", EventAction: "start", Result: "success", OSType: "linux", InternalIPList: []string{}, ExternalIPList: []string{}},
-			},
-		}, nil
-	}
-
-	t.Cleanup(func() {
-		eventlogScanFunc = originalScan
-	})
-
-	outputPath := filepath.Join(t.TempDir(), "eventlog.xlsx")
-
-	code := runEventlogCLI([]string{"-last", "7d"}, globalCLIOptions{OutputPath: outputPath})
-
-	if code != 0 {
-
-		t.Fatalf("expected exit code 0, got %d", code)
-
-	}
-
-	if _, err := os.Stat(outputPath); err != nil {
-
-		t.Fatalf("expected output file %s, got error: %v", outputPath, err)
-
-	}
-
-}
-
-func TestPayloadToRowsSupportsEventlogScanResult(t *testing.T) {
-
-	t.Parallel()
-
-	rows, err := payloadToRows(eventlogscan.ScanResult{
-		Total: 2,
-		Rows: []eventlogscan.EventRow{
-			{LogID: "a", Timestamp: 2, Source: "system", EventType: "system", EventLevel: "info", EventCode: "1", EventAction: "start", Result: "success", OSType: "linux", InternalIPList: []string{}, ExternalIPList: []string{}},
-			{LogID: "b", Timestamp: 1, Source: "auth", EventType: "login", EventLevel: "warn", EventCode: "2", EventAction: "login", Result: "fail", OSType: "linux", InternalIPList: []string{}, ExternalIPList: []string{}},
-		},
-	})
-
-	if err != nil {
-
-		t.Fatalf("payloadToRows returned error: %v", err)
-
-	}
-
-	if len(rows) != 2 {
-
-		t.Fatalf("expected 2 rows, got %d", len(rows))
-
-	}
-
-	if got := rows[0]["logId"]; got != "a" {
-
-		t.Fatalf("expected first row logId=a, got %#v", got)
-
-	}
-
-}
-
-func TestParseEventlogArgsAcceptsMaxLogs(t *testing.T) {
-
-	t.Parallel()
-
-	parsed, err := parseEventlogArgs([]string{"-last", "7d", "-maxLogs", "25"})
-
-	if err != nil {
-
-		t.Fatalf("parseEventlogArgs returned error: %v", err)
-
-	}
-
-	if parsed.Params.MaxLogs != 25 {
-
-		t.Fatalf("expected maxLogs=25, got %d", parsed.Params.MaxLogs)
-
-	}
-
-}
-
-func TestParseEventlogArgsRejectsNegativeMaxLogs(t *testing.T) {
-
-	t.Parallel()
-
-	_, err := parseEventlogArgs([]string{"-last", "7d", "-maxLogs", "-1"})
-
-	if err == nil || !strings.Contains(err.Error(), "maxLogs must be >= 0") {
-
-		t.Fatalf("expected maxLogs validation error, got: %v", err)
-
-	}
-
-}
-
-func TestRunUnifiedCLIEventlogShowsProgress(t *testing.T) {
-
-	originalScan := eventlogScanFunc
-
-	eventlogScanFunc = func(_ context.Context, params eventlogscan.QueryParams) (eventlogscan.ScanResult, error) {
-
-		if params.Progress == nil {
-
-			t.Fatal("expected eventlog progress callback to be wired")
-
-		}
-
-		params.Progress(0, 2, "collect_events")
-		params.Progress(1, 2, "collect_system")
-		params.Progress(2, 2, "complete")
-
-		return eventlogscan.ScanResult{
-
-			Total: 1,
-
-			Rows: []eventlogscan.EventRow{
-
-				{LogID: "a", Timestamp: 1, Source: "system", EventType: "system", EventLevel: "info", EventCode: "1", EventAction: "start", Result: "success", OSType: "linux", InternalIPList: []string{}, ExternalIPList: []string{}},
-			},
-		}, nil
-
-	}
-
-	t.Cleanup(func() {
-
-		eventlogScanFunc = originalScan
-
-	})
-
-	outputPath := filepath.Join(t.TempDir(), "eventlog.json")
-
-	code, stderr := runUnifiedCLIWithCapturedStderr(t, []string{"-o", outputPath, "eventlog", "-last", "7d"})
-
-	if code != 0 {
-
-		t.Fatalf("expected exit code 0, got %d, stderr=%s", code, stderr)
-
-	}
-
-	if !strings.Contains(stderr, "eventlog [") {
-
-		t.Fatalf("expected eventlog progress output, got: %s", stderr)
-
-	}
-
-	if !strings.Contains(stderr, "collect_system") {
-
-		t.Fatalf("expected eventlog progress stage in stderr, got: %s", stderr)
-
-	}
-
-}
-
 func TestEmitGeneratedFileHintsForShardedOutput(t *testing.T) {
 
 	t.Parallel()
@@ -2361,6 +2204,67 @@ func TestPrintRiskStreamSummaryIncludesExtendedCategories(t *testing.T) {
 	}
 }
 
+func TestStandaloneRiskCLIStreamsRiskFindingsAndPreservesJSONOutput(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected POST request, got %s", r.Method)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"query_status":"ok","data":[{"sha256_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","signature":"trojan.webshell","tags":["webshell"]}]}`)
+	}))
+	defer server.Close()
+
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "cloud.json")
+	inputPath := filepath.Join(tempDir, "risk-input.json")
+	outputPath := filepath.Join(t.TempDir(), "risk-output.json")
+	config := fmt.Sprintf(`{"providers":{"malwarebazaar":{"api_key":"test-key","base_url":"%s"}}}`, server.URL)
+	if err := os.WriteFile(configPath, []byte(config), 0o644); err != nil {
+
+		t.Fatalf("write cloud config: %v", err)
+	}
+	input := `[{"target_type":"file","target_path":"C:/tmp/bad.exe","hashes":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]`
+	if err := os.WriteFile(inputPath, []byte(input), 0o644); err != nil {
+
+		t.Fatalf("write input json: %v", err)
+	}
+	t.Setenv("C_EYES_CLOUD_CONFIG", configPath)
+
+	code, stderr := runUnifiedCLIWithCapturedStderr(t, []string{"-r", "-risk-mode", "cloud_only", "-o", outputPath, "-input", inputPath})
+	if code != 0 {
+
+		t.Fatalf("expected exit code 0, got %d, stderr=%s", code, stderr)
+	}
+	if !strings.Contains(stderr, "[HIGH]") {
+
+		t.Fatalf("expected streamed high-risk line in stderr, got: %s", stderr)
+	}
+	if !strings.Contains(stderr, "path=C:/tmp/bad.exe") {
+
+		t.Fatalf("expected streamed target path in stderr, got: %s", stderr)
+	}
+
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+
+		t.Fatalf("read output json: %v", err)
+	}
+	var payload []riskanalysis.AnalysisResult
+	if err := json.Unmarshal(data, &payload); err != nil {
+
+		t.Fatalf("unmarshal output json: %v, payload=%s", err, string(data))
+	}
+	if len(payload) != 1 {
+
+		t.Fatalf("expected 1 result, got %d", len(payload))
+	}
+	level := payload[0].RiskAssessment.RiskLevel
+	if level != riskanalysis.RiskLevelHigh && level != riskanalysis.RiskLevelCritical {
+
+		t.Fatalf("expected high or critical risk level, got %s", level)
+	}
+}
+
 func TestCompactSHA256(t *testing.T) {
 
 	t.Parallel()
@@ -2625,6 +2529,175 @@ func TestResolveOutputPathAutoSBOMSentinel(t *testing.T) {
 
 	}
 
+}
+
+func TestParseEventlogArgsAcceptsMaxLogs(t *testing.T) {
+
+	t.Parallel()
+
+	parsed, err := parseEventlogArgs([]string{"-last", "7d", "-maxLogs", "25"})
+
+	if err != nil {
+
+		t.Fatalf("parseEventlogArgs returned error: %v", err)
+
+	}
+
+	if parsed.Params.MaxLogs != 25 {
+
+		t.Fatalf("expected maxLogs=25, got %d", parsed.Params.MaxLogs)
+
+	}
+
+}
+
+func TestParseEventlogArgsRejectsNegativeMaxLogs(t *testing.T) {
+
+	t.Parallel()
+
+	_, err := parseEventlogArgs([]string{"-last", "7d", "-maxLogs", "-1"})
+
+	if err == nil || !strings.Contains(err.Error(), "maxLogs must be >= 0") {
+
+		t.Fatalf("expected maxLogs validation error, got: %v", err)
+
+	}
+
+}
+
+func TestRunUnifiedCLIEventlogShowsProgress(t *testing.T) {
+
+	originalExport := eventlogExportFunc
+
+	eventlogExportFunc = func(_ context.Context, params eventlogscan.QueryParams) (*eventlogscan.ExportResult, error) {
+
+		if params.Progress == nil {
+
+			t.Fatal("expected eventlog progress callback to be wired")
+
+		}
+
+		params.Progress(0, 2, "collect_events")
+
+		params.Progress(1, 2, "collect_system")
+
+		params.Progress(2, 2, "complete")
+
+		spoolDir := t.TempDir()
+		rowsPath := filepath.Join(spoolDir, "rows.jsonl")
+		row := eventlogscan.EventRow{
+			LogID:          "a",
+			Timestamp:      1,
+			Source:         "system",
+			EventType:      "system",
+			EventLevel:     "info",
+			EventCode:      "1",
+			EventAction:    "start",
+			Result:         "success",
+			OSType:         "linux",
+			InternalIPList: []string{},
+			ExternalIPList: []string{},
+		}
+		rowBytes, err := json.Marshal(row)
+		if err != nil {
+			t.Fatalf("marshal row failed: %v", err)
+		}
+		if err := os.WriteFile(rowsPath, append(rowBytes, '\n'), 0o600); err != nil {
+			t.Fatalf("write rows file failed: %v", err)
+		}
+
+		return &eventlogscan.ExportResult{
+			Total:    1,
+			RowsPath: rowsPath,
+			SpoolDir: spoolDir,
+		}, nil
+
+	}
+
+	t.Cleanup(func() {
+
+		eventlogExportFunc = originalExport
+
+	})
+
+	outputPath := filepath.Join(t.TempDir(), "eventlog.json")
+
+	code, stderr := runUnifiedCLIWithCapturedStderr(t, []string{"-o", outputPath, "eventlog", "-last", "7d"})
+
+	if code != 0 {
+
+		t.Fatalf("expected exit code 0, got %d, stderr=%s", code, stderr)
+
+	}
+
+	if !strings.Contains(stderr, "eventlog [") {
+
+		t.Fatalf("expected eventlog progress output, got: %s", stderr)
+
+	}
+
+	if !strings.Contains(stderr, "collect_system") {
+
+		t.Fatalf("expected eventlog progress stage in stderr, got: %s", stderr)
+
+	}
+
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read eventlog json failed: %v", err)
+	}
+	if !strings.Contains(string(data), "\"rows\"") || !strings.Contains(string(data), "\"total\": 1") {
+		t.Fatalf("unexpected eventlog json output: %s", string(data))
+	}
+
+}
+
+func TestRunUnifiedCLIEventlogCSVAndXLSXOutput(t *testing.T) {
+	originalExport := eventlogExportFunc
+	eventlogExportFunc = func(_ context.Context, _ eventlogscan.QueryParams) (*eventlogscan.ExportResult, error) {
+		spoolDir := t.TempDir()
+		rowsPath := filepath.Join(spoolDir, "rows.jsonl")
+		rows := []eventlogscan.EventRow{
+			{LogID: "a", Timestamp: 2, Source: "system", EventType: "system", EventLevel: "info", EventCode: "1", EventAction: "start", Result: "success", OSType: "linux", InternalIPList: []string{}, ExternalIPList: []string{}},
+			{LogID: "b", Timestamp: 1, Source: "system", EventType: "system", EventLevel: "warn", EventCode: "2", EventAction: "stop", Result: "fail", OSType: "linux", InternalIPList: []string{}, ExternalIPList: []string{}},
+		}
+		var data []byte
+		for _, row := range rows {
+			rowBytes, err := json.Marshal(row)
+			if err != nil {
+				t.Fatalf("marshal row failed: %v", err)
+			}
+			data = append(data, rowBytes...)
+			data = append(data, '\n')
+		}
+		if err := os.WriteFile(rowsPath, data, 0o600); err != nil {
+			t.Fatalf("write rows file failed: %v", err)
+		}
+		return &eventlogscan.ExportResult{Total: len(rows), RowsPath: rowsPath, SpoolDir: spoolDir}, nil
+	}
+	t.Cleanup(func() { eventlogExportFunc = originalExport })
+
+	csvPath := filepath.Join(t.TempDir(), "eventlog.csv")
+	code, stderr := runUnifiedCLIWithCapturedStderr(t, []string{"-o", csvPath, "eventlog", "-last", "7d"})
+	if code != 0 {
+		t.Fatalf("expected csv exit code 0, got %d, stderr=%s", code, stderr)
+	}
+	csvData, err := os.ReadFile(csvPath)
+	if err != nil {
+		t.Fatalf("read csv failed: %v", err)
+	}
+	if !strings.Contains(string(csvData), "logId") || !strings.Contains(string(csvData), "timestamp") {
+		t.Fatalf("unexpected csv content: %s", string(csvData))
+	}
+
+	xlsxPath := filepath.Join(t.TempDir(), "eventlog.xlsx")
+	code, stderr = runUnifiedCLIWithCapturedStderr(t, []string{"-o", xlsxPath, "eventlog", "-last", "7d"})
+	if code != 0 {
+		t.Fatalf("expected xlsx exit code 0, got %d, stderr=%s", code, stderr)
+	}
+	if _, err := os.Stat(xlsxPath); err != nil {
+		t.Fatalf("expected xlsx file exists: %v", err)
+	}
 }
 
 func TestParseSBOMArgsRequiresExactlyOneTarget(t *testing.T) {

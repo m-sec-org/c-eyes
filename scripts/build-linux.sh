@@ -5,18 +5,43 @@ OUTPUT_DIR="${1:-dist-linux-amd64}"
 OFFLINE="${OFFLINE:-1}"
 LINK_MODE="${LINK_MODE:-static}"
 COPY_RULES="${COPY_RULES:-0}"
+GLIBC_BASELINE="${GLIBC_BASELINE:-2.28}"
+ENFORCE_BASELINE_ENV="${ENFORCE_BASELINE_ENV:-0}"
+VERIFY_GLIBC_BASELINE="${VERIFY_GLIBC_BASELINE:-0}"
+ALLOW_ABI_DRIFT="${ALLOW_ABI_DRIFT:-0}"
+YARA_BASELINE_NAME="${YARA_BASELINE_NAME:-yara-x-dist-linux-glibc-${GLIBC_BASELINE}}"
+YARA_BASELINE_METADATA_FILE=".linux-glibc-baseline"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-YARA_BASE="$ROOT/third_party/yara-x-dist-linux"
-if [[ ! -d "$YARA_BASE/include" || ! -d "$YARA_BASE/lib" ]]; then
-  YARA_BASE="$ROOT/third_party/yara-x-dist"
-fi
 GO_TOOLCHAIN_ROOT="${GO_TOOLCHAIN_ROOT:-$ROOT/tmp/go-toolchain-local}"
 
 version_ge() {
   local current="$1"
   local required="$2"
   [[ "$(printf '%s\n%s\n' "$required" "$current" | sort -V | head -n 1)" == "$required" ]]
+}
+
+version_gt() {
+  local left="$1"
+  local right="$2"
+  [[ "$left" != "$right" ]] && version_ge "$left" "$right"
+}
+
+detect_glibc_version() {
+  local raw
+  raw="$(getconf GNU_LIBC_VERSION 2>/dev/null || true)"
+  if [[ -n "$raw" ]]; then
+    echo "$raw" | awk '{print $2}'
+    return
+  fi
+
+  raw="$(ldd --version 2>/dev/null | head -n 1 || true)"
+  if [[ -n "$raw" ]]; then
+    echo "$raw" | grep -oE '[0-9]+\.[0-9]+' | head -n 1
+    return
+  fi
+
+  echo ""
 }
 
 detect_go_version() {
@@ -27,6 +52,57 @@ detect_go_version() {
     return
   fi
   echo "$raw" | awk '{print $3}' | sed 's/^go//'
+}
+
+baseline_metadata_path() {
+  local base="$1"
+  echo "$base/$YARA_BASELINE_METADATA_FILE"
+}
+
+has_matching_baseline_metadata() {
+  local base="$1"
+  local metadata
+  metadata="$(baseline_metadata_path "$base")"
+  [[ -f "$metadata" ]] && [[ "$(tr -d '[:space:]' < "$metadata")" == "$GLIBC_BASELINE" ]]
+}
+
+resolve_yara_base() {
+  local candidates=(
+    "$ROOT/third_party/$YARA_BASELINE_NAME"
+    "$ROOT/third_party/yara-x-dist-linux"
+    "$ROOT/third_party/yara-x-dist"
+  )
+  local base
+  for base in "${candidates[@]}"; do
+    if [[ -d "$base/include" && ( -d "$base/lib" || -d "$base/lib64" ) ]]; then
+      echo "$base"
+      return
+    fi
+  done
+  echo "$ROOT/third_party/$YARA_BASELINE_NAME"
+}
+
+ensure_baseline_environment() {
+  local current_glibc
+  current_glibc="$(detect_glibc_version)"
+  if [[ "$ENFORCE_BASELINE_ENV" != "1" || "$ALLOW_ABI_DRIFT" == "1" ]]; then
+    return
+  fi
+  if [[ -z "$current_glibc" ]]; then
+    echo "unable to detect current glibc version while baseline enforcement is enabled" >&2
+    exit 1
+  fi
+  if [[ "$current_glibc" != "$GLIBC_BASELINE" ]]; then
+    echo "baseline build requires glibc $GLIBC_BASELINE exactly; detected glibc $current_glibc" >&2
+    echo "Use the pinned baseline build environment, or set ALLOW_ABI_DRIFT=1 only for non-release local builds." >&2
+    exit 1
+  fi
+}
+
+write_baseline_metadata() {
+  local base="$1"
+  mkdir -p "$base"
+  printf '%s\n' "$GLIBC_BASELINE" > "$(baseline_metadata_path "$base")"
 }
 
 setup_offline_go() {
@@ -61,6 +137,7 @@ setup_offline_go() {
   if [[ -z "${GOMODCACHE:-}" ]]; then
     local cache_candidates=(
       "$ROOT/tmp/go-mod-cache"
+      "/gomodcache"
       "/mnt/c/Users/Administrator/go/pkg/mod"
       "$HOME/go/pkg/mod"
     )
@@ -97,28 +174,51 @@ has_linux_so() {
   [[ -f "$lib_dir/libyara_x_capi.so" || -f "$lib_dir/libyara_x_capi.so.0" || -f "$lib_dir/libyara_x_capi.so.1" || -f "$lib_dir/libyara_x_capi.so.1.14.0" ]]
 }
 
+binary_needs_yara_shared() {
+  local exe="$1"
+  readelf -d "$exe" 2>/dev/null | grep -q 'libyara_x_capi\.so'
+}
+
 resolve_linux_lib_dir() {
   local base="$1"
-  local lib_root="$base/lib"
-  local multiarch="$lib_root/x86_64-linux-gnu"
-  if [[ -d "$multiarch" ]]; then
-    if has_linux_so "$multiarch"; then
-      echo "$multiarch"
+  local roots=("$base/lib" "$base/lib64")
+  local lib_root multiarch
+  for lib_root in "${roots[@]}"; do
+    [[ -d "$lib_root" ]] || continue
+    multiarch="$lib_root/x86_64-linux-gnu"
+    if [[ -d "$multiarch" ]]; then
+      if has_linux_so "$multiarch"; then
+        echo "$multiarch"
+        return
+      fi
+      if ! has_linux_so "$lib_root"; then
+        echo "$multiarch"
+        return
+      fi
+    fi
+    if has_linux_so "$lib_root" || [[ -f "$lib_root/libyara_x_capi.a" ]]; then
+      echo "$lib_root"
       return
     fi
-    if ! has_linux_so "$lib_root"; then
-      echo "$multiarch"
-      return
-    fi
-  fi
-  echo "$lib_root"
+  done
+  echo "$base/lib"
 }
+
+YARA_BASE="$(resolve_yara_base)"
+ensure_baseline_environment
 
 INCLUDE="$YARA_BASE/include"
 LIB="$(resolve_linux_lib_dir "$YARA_BASE")"
 
 if [[ ! -d "$INCLUDE" || ! -d "$LIB" ]]; then
-  echo "linux yara dist not found. Expected one of: $ROOT/third_party/yara-x-dist-linux or $ROOT/third_party/yara-x-dist" >&2
+  echo "linux yara dist not found. Expected baseline artifact tree at: $ROOT/third_party/$YARA_BASELINE_NAME" >&2
+  exit 1
+fi
+
+if [[ "$ENFORCE_BASELINE_ENV" == "1" && "$ALLOW_ABI_DRIFT" != "1" ]] && ! has_matching_baseline_metadata "$YARA_BASE"; then
+  echo "baseline metadata missing or mismatched for Linux YARA-X artifacts under: $YARA_BASE" >&2
+  echo "Expected $(baseline_metadata_path "$YARA_BASE") to contain: $GLIBC_BASELINE" >&2
+  echo "Regenerate baseline Linux YARA-X artifacts before packaging release builds." >&2
   exit 1
 fi
 
@@ -136,6 +236,7 @@ if ! has_linux_so "$LIB"; then
     exit 1
   fi
   (cd "$ROOT/third_party/yara-x-src" && cargo cinstall -p yara-x-capi --release --prefix "$YARA_BASE")
+  write_baseline_metadata "$YARA_BASE"
 fi
 
 if ! command -v pkg-config >/dev/null 2>&1; then
@@ -145,9 +246,9 @@ fi
 
 setup_offline_go
 
-export PKG_CONFIG_PATH="$LIB/pkgconfig:${PKG_CONFIG_PATH:-}"
 export CGO_ENABLED=1
 export CGO_CFLAGS="-I$INCLUDE"
+export PKG_CONFIG="pkg-config"
 
 if [[ "$LINK_MODE" == "static" ]]; then
   STATIC_ARCHIVE="$LIB/libyara_x_capi.a"
@@ -155,25 +256,52 @@ if [[ "$LINK_MODE" == "static" ]]; then
     echo "static archive not found: $STATIC_ARCHIVE" >&2
     exit 1
   fi
-  # Keep glibc/system runtime dynamic, but link yara_x_capi itself statically
-  # so distribution no longer requires libyara_x_capi.so files.
-  export CGO_LDFLAGS="$STATIC_ARCHIVE -lgcc_s -lutil -lrt -lpthread -lm -ldl -lc"
+  STATIC_PKGCONFIG_PARENT="${TMPDIR:-/tmp}"
+  if [[ ! -d "$STATIC_PKGCONFIG_PARENT" || ! -w "$STATIC_PKGCONFIG_PARENT" ]]; then
+    STATIC_PKGCONFIG_PARENT="$ROOT/tmp"
+    mkdir -p "$STATIC_PKGCONFIG_PARENT"
+  fi
+  STATIC_PKGCONFIG_DIR="$(mktemp -d "$STATIC_PKGCONFIG_PARENT/yara-static-pkgconfig.XXXXXX")"
+  trap 'rm -rf "$STATIC_PKGCONFIG_DIR"' EXIT
+  cat > "$STATIC_PKGCONFIG_DIR/yara_x_capi.pc" <<EOF
+prefix=$YARA_BASE
+exec_prefix=\${prefix}
+libdir=$LIB
+includedir=$INCLUDE
+
+Name: yara_x_capi
+Description: Static Linux YARA-X C API
+Version: 1.14.0
+Libs: \${libdir}/libyara_x_capi.a
+Cflags: -I\${includedir}
+Libs.private: -lgcc_s -lutil -lrt -lpthread -lm -ldl -lc
+EOF
+  export PKG_CONFIG_PATH="$STATIC_PKGCONFIG_DIR:$LIB/pkgconfig:${PKG_CONFIG_PATH:-}"
 else
+  export PKG_CONFIG_PATH="$LIB/pkgconfig:${PKG_CONFIG_PATH:-}"
   export CGO_LDFLAGS="-L$LIB -lyara_x_capi -Wl,-rpath,\$ORIGIN"
 fi
 
 OUT_DIR="$ROOT/$OUTPUT_DIR"
 mkdir -p "$OUT_DIR"
+printf 'glibc=%s\nruntime=systemd\n' "$GLIBC_BASELINE" > "$OUT_DIR/linux-build-baseline.txt"
 
 EXE="$OUT_DIR/c-eyes"
+BUILD_TAGS="yarax"
+if [[ "$LINK_MODE" == "static" ]]; then
+  BUILD_TAGS="$BUILD_TAGS static_link"
+fi
 (
   cd "$ROOT"
-  go build -tags yarax -o "$EXE" ./cmd/edr
+  go build -tags "$BUILD_TAGS" -o "$EXE" ./cmd/edr
 )
 
-if [[ "$LINK_MODE" == "static" ]]; then
-  rm -f "$OUT_DIR/libyara_x_capi.so"*
-else
+NEEDS_YARA_SHARED=0
+if binary_needs_yara_shared "$EXE"; then
+  NEEDS_YARA_SHARED=1
+fi
+
+if [[ "$LINK_MODE" != "static" || "$NEEDS_YARA_SHARED" == "1" ]]; then
   shopt -s nullglob
   so_files=("$LIB/libyara_x_capi.so"*)
   if [[ ${#so_files[@]} -gt 0 ]]; then
@@ -184,6 +312,8 @@ else
     echo "warning: libyara_x_capi.so not found under $LIB" >&2
   fi
   shopt -u nullglob
+else
+  rm -f "$OUT_DIR/libyara_x_capi.so"*
 fi
 
 if [[ "$COPY_RULES" == "1" ]]; then
@@ -209,10 +339,17 @@ else
   echo "Cloud config template not found at $CLOUD_CFG_SRC. Skipping config copy."
 fi
 
+if [[ "$VERIFY_GLIBC_BASELINE" == "1" ]]; then
+  "$ROOT/scripts/verify-linux-glibc.sh" "$OUT_DIR" "$GLIBC_BASELINE"
+fi
+
 echo "Built: $EXE"
-if [[ "$LINK_MODE" == "static" ]]; then
+if [[ "$NEEDS_YARA_SHARED" == "1" ]]; then
+  echo "Bundled: libyara_x_capi.so* (runtime dependency)"
+elif [[ "$LINK_MODE" == "static" ]]; then
   echo "Linked: libyara_x_capi.a (static)"
 else
   echo "Copied: libyara_x_capi.so*"
 fi
 echo "Link mode: $LINK_MODE"
+echo "glibc baseline: $GLIBC_BASELINE"
