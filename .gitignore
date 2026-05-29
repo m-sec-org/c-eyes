@@ -9,6 +9,13 @@ cmd/edr/result*.xlsx
 cmd/edr/result*.json
 cmd/edr/result*.csv
 
+# Heavy third-party native dependencies are restored from local/release bundles.
+third_party/*
+!third_party/
+!third_party/repo.txt
+!third_party/version.txt
+c-eyes-third-party/
+
 # Temp and editor artifacts
 .tmp/
 tmp/
@@ -17,4 +24,3 @@ tmp/
 *.swp
 *.swo
 *.orig
-
