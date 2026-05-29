@@ -1,16 +1,88 @@
 param(
     [string]$OutputDir = "dist-windows-amd64",
     [switch]$BootstrapToolchain,
-    [bool]$Offline = $true,
+    [bool]$Offline = $false,
     [ValidateSet("static", "dynamic")]
     [string]$LinkMode = "static",
-    [bool]$CopyRules = $false
+    [bool]$CopyRules = $false,
+    [switch]$SkipAutoFetchThirdParty
 )
 
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $root = Split-Path -Parent $root
+
+function New-DefaultCloudConfig {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$OutputPath
+    )
+
+    @'
+{
+  "proxy_url": "",
+  "providers": {
+    "virustotal": {
+      "api_key": "",
+      "base_url": "https://www.virustotal.com",
+      "upload_enabled": true,
+      "upload_rate_limit": "15s",
+      "rate_limit": "2s",
+      "timeout": "10s",
+      "cache_ttl": "10m"
+    },
+    "hybrid_analysis": {
+      "api_key": "",
+      "base_url": "https://hybrid-analysis.com/api/v2",
+      "upload_enabled": true,
+      "upload_rate_limit": "5s",
+      "rate_limit": "2s",
+      "timeout": "10s",
+      "cache_ttl": "10m"
+    },
+    "malwarebazaar": {
+      "api_key": "",
+      "base_url": "https://mb-api.abuse.ch/api/v1/",
+      "upload_enabled": false,
+      "rate_limit": "2s",
+      "timeout": "10s",
+      "cache_ttl": "10m"
+    },
+    "otx": {
+      "api_key": "",
+      "base_url": "https://otx.alienvault.com",
+      "upload_enabled": false,
+      "rate_limit": "2s",
+      "timeout": "10s",
+      "cache_ttl": "10m"
+    },
+    "triage": {
+      "api_key": "",
+      "base_url": "https://tria.ge/api/v0",
+      "upload_enabled": true,
+      "upload_rate_limit": "3s",
+      "rate_limit": "2s",
+      "timeout": "10s",
+      "cache_ttl": "10m"
+    }
+  }
+}
+'@ | Set-Content -LiteralPath $OutputPath -Encoding UTF8
+}
+
+function Write-SanitizedCloudConfig {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SourcePath,
+        [Parameter(Mandatory = $true)]
+        [string]$OutputPath
+    )
+
+    $content = Get-Content -LiteralPath $SourcePath -Raw
+    $content = [regex]::Replace($content, '(?<="api_key"\s*:\s*")[^"]*', '')
+    Set-Content -LiteralPath $OutputPath -Value $content -Encoding UTF8
+}
 
 $yaraBase = Join-Path $root "third_party\yara-x-dist"
 $include = Join-Path $yaraBase "include"
@@ -21,6 +93,10 @@ $localToolchainBin = Join-Path $root "third_party\toolchain\mingw64\bin"
 $localGcc = Join-Path $localToolchainBin "gcc.exe"
 $localGpp = Join-Path $localToolchainBin "g++.exe"
 $localPkgconf = Join-Path $localToolchainBin "pkgconf.exe"
+
+if ((-not $SkipAutoFetchThirdParty.IsPresent) -and ((-not (Test-Path $include)) -or (-not (Test-Path $lib)) -or (-not (Test-Path $bin)) -or (-not (Test-Path $localGcc)))) {
+    & (Join-Path $root "scripts\ensure-third-party.ps1") -Platform windows -Arch amd64
+}
 
 if (-not (Test-Path $include) -or -not (Test-Path $lib) -or -not (Test-Path $bin)) {
     throw "yara-x-dist not found. Expected $yaraBase."
@@ -150,11 +226,13 @@ if ($CopyRules) {
 }
 
 $cloudTemplate = Join-Path $root "c-eyes-cloud.json"
+ $cloudOutput = Join-Path $outDir "c-eyes-cloud.json"
 if (Test-Path $cloudTemplate) {
-    Copy-Item $cloudTemplate (Join-Path $outDir "c-eyes-cloud.json") -Force
-Write-Host "Copied: c-eyes-cloud.json (API key template)"
+    Write-SanitizedCloudConfig -SourcePath $cloudTemplate -OutputPath $cloudOutput
+    Write-Host "Wrote: c-eyes-cloud.json (sanitized API key template)"
 } else {
-    Write-Host "Cloud config template not found at $cloudTemplate. Skipping config copy."
+    New-DefaultCloudConfig -OutputPath $cloudOutput
+    Write-Host "Generated: c-eyes-cloud.json (default API key template)"
 }
 
 Write-Host "Built: $exe"

@@ -1,19 +1,82 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-OUTPUT_DIR="${1:-dist-linux-amd64}"
-OFFLINE="${OFFLINE:-1}"
+OUTPUT_DIR="${1:-}"
+OFFLINE="${OFFLINE:-0}"
 LINK_MODE="${LINK_MODE:-static}"
 COPY_RULES="${COPY_RULES:-0}"
+BUILD_PROFILE="${BUILD_PROFILE:-release}"
 GLIBC_BASELINE="${GLIBC_BASELINE:-2.28}"
 ENFORCE_BASELINE_ENV="${ENFORCE_BASELINE_ENV:-0}"
 VERIFY_GLIBC_BASELINE="${VERIFY_GLIBC_BASELINE:-0}"
 ALLOW_ABI_DRIFT="${ALLOW_ABI_DRIFT:-0}"
-YARA_BASELINE_NAME="${YARA_BASELINE_NAME:-yara-x-dist-linux-glibc-${GLIBC_BASELINE}}"
+ALLOW_CROSS_ARCH="${ALLOW_CROSS_ARCH:-0}"
+AUTO_FETCH_THIRD_PARTY="${AUTO_FETCH_THIRD_PARTY:-1}"
+YARA_BASELINE_NAME="${YARA_BASELINE_NAME:-}"
 YARA_BASELINE_METADATA_FILE=".linux-glibc-baseline"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GO_TOOLCHAIN_ROOT="${GO_TOOLCHAIN_ROOT:-$ROOT/tmp/go-toolchain-local}"
+
+write_default_cloud_config() {
+  local output_path="$1"
+  cat > "$output_path" <<'EOF'
+{
+  "proxy_url": "",
+  "providers": {
+    "virustotal": {
+      "api_key": "",
+      "base_url": "https://www.virustotal.com",
+      "upload_enabled": true,
+      "upload_rate_limit": "15s",
+      "rate_limit": "2s",
+      "timeout": "10s",
+      "cache_ttl": "10m"
+    },
+    "hybrid_analysis": {
+      "api_key": "",
+      "base_url": "https://hybrid-analysis.com/api/v2",
+      "upload_enabled": true,
+      "upload_rate_limit": "5s",
+      "rate_limit": "2s",
+      "timeout": "10s",
+      "cache_ttl": "10m"
+    },
+    "malwarebazaar": {
+      "api_key": "",
+      "base_url": "https://mb-api.abuse.ch/api/v1/",
+      "upload_enabled": false,
+      "rate_limit": "2s",
+      "timeout": "10s",
+      "cache_ttl": "10m"
+    },
+    "otx": {
+      "api_key": "",
+      "base_url": "https://otx.alienvault.com",
+      "upload_enabled": false,
+      "rate_limit": "2s",
+      "timeout": "10s",
+      "cache_ttl": "10m"
+    },
+    "triage": {
+      "api_key": "",
+      "base_url": "https://tria.ge/api/v0",
+      "upload_enabled": true,
+      "upload_rate_limit": "3s",
+      "rate_limit": "2s",
+      "timeout": "10s",
+      "cache_ttl": "10m"
+    }
+  }
+}
+EOF
+}
+
+write_sanitized_cloud_config() {
+  local source_path="$1"
+  local output_path="$2"
+  sed -E 's/("api_key"[[:space:]]*:[[:space:]]*")[^"]*"/\1"/g' "$source_path" > "$output_path"
+}
 
 version_ge() {
   local current="$1"
@@ -25,6 +88,37 @@ version_gt() {
   local left="$1"
   local right="$2"
   [[ "$left" != "$right" ]] && version_ge "$left" "$right"
+}
+
+detect_host_arch() {
+  local raw
+  raw="$(uname -m 2>/dev/null || true)"
+  case "$raw" in
+    x86_64|amd64)
+      echo "amd64"
+      ;;
+    aarch64|arm64)
+      echo "arm64"
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
+
+linux_multiarch_triplet() {
+  local arch="$1"
+  case "$arch" in
+    amd64)
+      echo "x86_64-linux-gnu"
+      ;;
+    arm64)
+      echo "aarch64-linux-gnu"
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
 }
 
 detect_glibc_version() {
@@ -54,6 +148,65 @@ detect_go_version() {
   echo "$raw" | awk '{print $3}' | sed 's/^go//'
 }
 
+HOST_ARCH="$(detect_host_arch)"
+TARGET_ARCH="${TARGET_ARCH:-$HOST_ARCH}"
+HOST_GLIBC="$(detect_glibc_version)"
+
+if [[ -z "$HOST_ARCH" ]]; then
+  echo "unsupported host architecture: $(uname -m 2>/dev/null || echo unknown)" >&2
+  echo "Supported host architectures: amd64, arm64" >&2
+  exit 1
+fi
+
+if [[ -z "$TARGET_ARCH" ]]; then
+  echo "unable to resolve target architecture" >&2
+  exit 1
+fi
+
+case "$TARGET_ARCH" in
+  amd64|arm64)
+    ;;
+  *)
+    echo "unsupported target architecture: $TARGET_ARCH" >&2
+    echo "Supported target architectures: amd64, arm64" >&2
+    exit 1
+    ;;
+esac
+
+case "$BUILD_PROFILE" in
+  release|host)
+    ;;
+  *)
+    echo "unsupported BUILD_PROFILE: $BUILD_PROFILE" >&2
+    echo "Supported BUILD_PROFILE values: release, host" >&2
+    exit 1
+    ;;
+esac
+
+if [[ "$TARGET_ARCH" != "$HOST_ARCH" && "$ALLOW_CROSS_ARCH" != "1" ]]; then
+  echo "cross-architecture Linux packaging is disabled by default." >&2
+  echo "Host architecture: $HOST_ARCH" >&2
+  echo "Target architecture: $TARGET_ARCH" >&2
+  echo "Build on a matching Linux machine, or set ALLOW_CROSS_ARCH=1 only if you have a working cross toolchain and matching native dependencies." >&2
+  exit 1
+fi
+
+if [[ -z "$HOST_GLIBC" ]]; then
+  echo "unable to detect host glibc version." >&2
+  exit 1
+fi
+if ! version_ge "$HOST_GLIBC" "$GLIBC_BASELINE"; then
+  echo "detected host glibc $HOST_GLIBC, but this build requires glibc >= $GLIBC_BASELINE." >&2
+  echo "Use a host with compatible glibc, or keep using the published release binaries." >&2
+  exit 1
+fi
+
+if [[ -z "$OUTPUT_DIR" ]]; then
+  OUTPUT_DIR="dist-linux-${TARGET_ARCH}"
+fi
+
+YARA_BASELINE_NAME="${YARA_BASELINE_NAME:-yara-x-dist-linux-glibc-${GLIBC_BASELINE}-${TARGET_ARCH}}"
+
 baseline_metadata_path() {
   local base="$1"
   echo "$base/$YARA_BASELINE_METADATA_FILE"
@@ -61,28 +214,19 @@ baseline_metadata_path() {
 
 has_matching_baseline_metadata() {
   local base="$1"
+  local expected_baseline="$2"
   local metadata
   metadata="$(baseline_metadata_path "$base")"
-  [[ -f "$metadata" ]] && [[ "$(tr -d '[:space:]' < "$metadata")" == "$GLIBC_BASELINE" ]]
+  [[ -f "$metadata" ]] && [[ "$(tr -d '[:space:]' < "$metadata")" == "$expected_baseline" ]]
 }
 
 resolve_yara_base() {
-  local candidates=(
-    "$ROOT/third_party/$YARA_BASELINE_NAME"
-    "$ROOT/third_party/yara-x-dist-linux"
-    "$ROOT/third_party/yara-x-dist"
-  )
-  local base
-  for base in "${candidates[@]}"; do
-    if [[ -d "$base/include" && ( -d "$base/lib" || -d "$base/lib64" ) ]]; then
-      echo "$base"
-      return
-    fi
-  done
-  echo "$ROOT/third_party/$YARA_BASELINE_NAME"
+  local yara_name="$1"
+  echo "$ROOT/third_party/$yara_name"
 }
 
 ensure_baseline_environment() {
+  local required_glibc="$1"
   local current_glibc
   current_glibc="$(detect_glibc_version)"
   if [[ "$ENFORCE_BASELINE_ENV" != "1" || "$ALLOW_ABI_DRIFT" == "1" ]]; then
@@ -92,8 +236,8 @@ ensure_baseline_environment() {
     echo "unable to detect current glibc version while baseline enforcement is enabled" >&2
     exit 1
   fi
-  if [[ "$current_glibc" != "$GLIBC_BASELINE" ]]; then
-    echo "baseline build requires glibc $GLIBC_BASELINE exactly; detected glibc $current_glibc" >&2
+  if [[ "$current_glibc" != "$required_glibc" ]]; then
+    echo "baseline build requires glibc $required_glibc exactly; detected glibc $current_glibc" >&2
     echo "Use the pinned baseline build environment, or set ALLOW_ABI_DRIFT=1 only for non-release local builds." >&2
     exit 1
   fi
@@ -112,7 +256,7 @@ setup_offline_go() {
 
   local required_go toolchain_tag toolchain_dir toolchain_zip go_ver
   required_go="$(awk '/^go / { print $2; exit }' "$ROOT/go.mod")"
-  toolchain_tag="v0.0.1-go${required_go}.linux-amd64"
+  toolchain_tag="v0.0.1-go${required_go}.linux-${TARGET_ARCH}"
   toolchain_dir="$GO_TOOLCHAIN_ROOT/golang.org/toolchain@${toolchain_tag}"
   toolchain_zip="$ROOT/tmp/${toolchain_tag}.zip"
 
@@ -183,16 +327,16 @@ resolve_linux_lib_dir() {
   local base="$1"
   local roots=("$base/lib" "$base/lib64")
   local lib_root multiarch
+  multiarch="$(linux_multiarch_triplet "$TARGET_ARCH")"
   for lib_root in "${roots[@]}"; do
     [[ -d "$lib_root" ]] || continue
-    multiarch="$lib_root/x86_64-linux-gnu"
-    if [[ -d "$multiarch" ]]; then
-      if has_linux_so "$multiarch"; then
-        echo "$multiarch"
+    if [[ -n "$multiarch" && -d "$lib_root/$multiarch" ]]; then
+      if has_linux_so "$lib_root/$multiarch"; then
+        echo "$lib_root/$multiarch"
         return
       fi
       if ! has_linux_so "$lib_root"; then
-        echo "$multiarch"
+        echo "$lib_root/$multiarch"
         return
       fi
     fi
@@ -204,18 +348,26 @@ resolve_linux_lib_dir() {
   echo "$base/lib"
 }
 
-YARA_BASE="$(resolve_yara_base)"
-ensure_baseline_environment
+YARA_BASE="$(resolve_yara_base "$YARA_BASELINE_NAME")"
+if [[ "$BUILD_PROFILE" == "release" ]]; then
+  ensure_baseline_environment "$GLIBC_BASELINE"
+fi
 
 INCLUDE="$YARA_BASE/include"
 LIB="$(resolve_linux_lib_dir "$YARA_BASE")"
 
+if [[ "$AUTO_FETCH_THIRD_PARTY" == "1" ]] && [[ ! -d "$INCLUDE" || ! -d "$LIB" ]]; then
+  bash "$ROOT/scripts/ensure-third-party.sh" --platform linux --arch "$TARGET_ARCH" --glibc-baseline "$GLIBC_BASELINE"
+  INCLUDE="$YARA_BASE/include"
+  LIB="$(resolve_linux_lib_dir "$YARA_BASE")"
+fi
+
 if [[ ! -d "$INCLUDE" || ! -d "$LIB" ]]; then
-  echo "linux yara dist not found. Expected baseline artifact tree at: $ROOT/third_party/$YARA_BASELINE_NAME" >&2
+  echo "linux yara dist not found. Expected artifact tree at: $ROOT/third_party/$YARA_BASELINE_NAME" >&2
   exit 1
 fi
 
-if [[ "$ENFORCE_BASELINE_ENV" == "1" && "$ALLOW_ABI_DRIFT" != "1" ]] && ! has_matching_baseline_metadata "$YARA_BASE"; then
+if [[ "$ENFORCE_BASELINE_ENV" == "1" && "$ALLOW_ABI_DRIFT" != "1" ]] && ! has_matching_baseline_metadata "$YARA_BASE" "$GLIBC_BASELINE"; then
   echo "baseline metadata missing or mismatched for Linux YARA-X artifacts under: $YARA_BASE" >&2
   echo "Expected $(baseline_metadata_path "$YARA_BASE") to contain: $GLIBC_BASELINE" >&2
   echo "Regenerate baseline Linux YARA-X artifacts before packaging release builds." >&2
@@ -223,20 +375,10 @@ if [[ "$ENFORCE_BASELINE_ENV" == "1" && "$ALLOW_ABI_DRIFT" != "1" ]] && ! has_ma
 fi
 
 if ! has_linux_so "$LIB"; then
-  if [[ ! -d "$ROOT/third_party/yara-x-src" ]]; then
-    echo "yara-x-src not found. Clone YARA-X into third_party/yara-x-src first." >&2
-    exit 1
-  fi
-  if ! command -v cargo >/dev/null 2>&1; then
-    echo "cargo is required to build yara-x-capi (Rust toolchain)." >&2
-    exit 1
-  fi
-  if ! cargo cinstall -h >/dev/null 2>&1; then
-    echo "cargo-c is required. Install with: cargo install cargo-c" >&2
-    exit 1
-  fi
-  (cd "$ROOT/third_party/yara-x-src" && cargo cinstall -p yara-x-capi --release --prefix "$YARA_BASE")
-  write_baseline_metadata "$YARA_BASE"
+  echo "linux yara dist is incomplete under: $YARA_BASE" >&2
+  echo "Expected prebuilt shared objects in the packaged Linux dependency tree." >&2
+  echo "This build path requires the full packaged dependency set and does not fall back to rebuilding YARA-X from source." >&2
+  exit 1
 fi
 
 if ! command -v pkg-config >/dev/null 2>&1; then
@@ -247,6 +389,8 @@ fi
 setup_offline_go
 
 export CGO_ENABLED=1
+export GOOS=linux
+export GOARCH="$TARGET_ARCH"
 export CGO_CFLAGS="-I$INCLUDE"
 export PKG_CONFIG="pkg-config"
 
@@ -284,7 +428,6 @@ fi
 
 OUT_DIR="$ROOT/$OUTPUT_DIR"
 mkdir -p "$OUT_DIR"
-printf 'glibc=%s\nruntime=systemd\n' "$GLIBC_BASELINE" > "$OUT_DIR/linux-build-baseline.txt"
 
 EXE="$OUT_DIR/c-eyes"
 BUILD_TAGS="yarax"
@@ -333,10 +476,11 @@ fi
 
 CLOUD_CFG_SRC="$ROOT/c-eyes-cloud.json"
 if [[ -f "$CLOUD_CFG_SRC" ]]; then
-  cp -a "$CLOUD_CFG_SRC" "$OUT_DIR/c-eyes-cloud.json"
-  echo "Copied: c-eyes-cloud.json (API key template)"
+  write_sanitized_cloud_config "$CLOUD_CFG_SRC" "$OUT_DIR/c-eyes-cloud.json"
+  echo "Wrote: c-eyes-cloud.json (sanitized API key template)"
 else
-  echo "Cloud config template not found at $CLOUD_CFG_SRC. Skipping config copy."
+  write_default_cloud_config "$OUT_DIR/c-eyes-cloud.json"
+  echo "Generated: c-eyes-cloud.json (default API key template)"
 fi
 
 if [[ "$VERIFY_GLIBC_BASELINE" == "1" ]]; then
@@ -351,5 +495,7 @@ elif [[ "$LINK_MODE" == "static" ]]; then
 else
   echo "Copied: libyara_x_capi.so*"
 fi
+echo "Build profile: $BUILD_PROFILE"
 echo "Link mode: $LINK_MODE"
 echo "glibc baseline: $GLIBC_BASELINE"
+echo "host glibc detected: $HOST_GLIBC"

@@ -15,7 +15,7 @@ C-Eyes 是一款基于 Go 语言的终端安全检测与响应工具（EDR系统
 C-Eyes工具基于上述检测模块扫描信息，提供基于yara规则风险分析的能力，当前hostscan和filescan已完成入侵风险分析的对接，在一级指令后添加 --riskanalyze或者-r与风险分析进行联动。
 ```
 
-## 安装说明
+## 直接安装
 直接下载编译好的zip压缩包，为保证检测覆盖范围和效果，建议使用高权限用户启动。
 
 Windows 操作系统：建议以管理员身份运行 cmd，之后再输入 C-Eyes 路径运行即可或进入终端后切换到 C-Eyes 程序目录下运行程序。
@@ -26,6 +26,74 @@ c-eyes -h         #如果显示帮助信息说明安装成功
 Linux 操作系统：建议以 root 用户身份运行 C-Eyes 工具。
 ```
 ./c-eyes -h       #如果显示帮助信息说明安装成功
+```
+
+## 自编译安装（二进制文件不兼容时使用）
+自编译安装脚本执行优先级：
+
+1.先检查当前路径下是否有 `c-eyes-third-party` 文件（这块需要自己在 `release` 里下载），有就直接使用构建，避免脚本自动下载时的网络问题。
+
+2.如果上一步失败，脚本会自动下载  `release`  里的依赖 `c-eyes-third-party` 来使用构建，脚本会看 `repo.txt` 和 `version.txt` 文件里写的仓库和版本号下载，已经默认写好了，可以先查看这两个文件写的有没有问题。
+
+### Windows 自编译
+
+#### 安装依赖
+- Windows `amd64`
+- Go `1.25.0` 或更高版本
+- PowerShell
+
+#### 先进入源码目录
+```
+cd c-eyes
+```
+
+#### 执行打包脚本
+```
+powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
+```
+
+#### 自检
+查看是否产出可执行文件
+```
+dist-windows-amd64/c-eyes.exe
+```
+如果显示帮助信息说明打包成功
+```
+c-eyes -h
+```
+
+### Linux 自编译
+
+#### 安装依赖
+- Linux `amd64`
+- Go `1.25.0` 或更高版本
+- `bash`
+- `gcc`
+- `pkg-config`
+
+#### 先进入源码目录
+```
+cd c-eyes
+```
+
+#### 执行打包脚本
+Linux-amd
+```
+TARGET_ARCH=amd64 bash ./scripts/build-linux.sh dist-linux-amd64
+```
+Linux-arm
+```
+TARGET_ARCH=arm64 bash ./scripts/build-linux.sh dist-linux-arm64
+```
+
+#### 自检
+查看是否产出可执行文件
+```
+dist-linux-amd64/c-eyes 或 dist-linux-arm64/c-eyes
+```
+如果显示帮助信息说明打包成功
+```
+./c-eyes -h
 ```
 
 ## 云平台配置说明

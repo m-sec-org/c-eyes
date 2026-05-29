@@ -1,0 +1,4 @@
+# Optional default release repository for third-party assets.
+# Format: owner/repo
+
+m-sec-org/c-eyes

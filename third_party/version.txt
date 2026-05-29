@@ -1,0 +1,5 @@
+# Optional default third-party release tag.
+# You can override with environment variable THIRD_PARTY_TAG.
+
+v1.6
+
